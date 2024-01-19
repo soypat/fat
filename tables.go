@@ -8,6 +8,92 @@ const (
 	negative1_32        = 0xffff_ffff
 	badLBA       lba    = negative1_32
 	mask28bits   uint32 = 0x0FFF_FFFF
+
+	offsetMBRTable = 446 // Offset of partition table in the MBR.
+	sizePartition  = 16  // Size of a partition table entry.
+)
+
+const (
+	nsFLAG   = 11   // Index of the name status byte
+	nsLOSS   = 0x01 // Out of 8.3 format
+	nsLFN    = 0x02 // Force to create LFN entry
+	nsLAST   = 0x04 // Last segment
+	nsBODY   = 0x08 // Lower case flag (body)
+	nsEXT    = 0x10 // Lower case flag (ext)
+	nsDOT    = 0x20 // Dot entry
+	nsNOLFN  = 0x40 // Do not find LFN
+	nsNONAME = 0x80 // Not followed
+
+	fsiLeadSig    = 0   // FAT32 FSI: Leading signature (DWORD)
+	fsiStrucSig   = 484 // FAT32 FSI: Structure signature (DWORD)
+	fsiFree_Count = 488 // FAT32 FSI: Number of free clusters (DWORD)
+	fsiNxt_Free   = 492 // FAT32 FSI: Last allocated cluster (DWORD)
+
+	bsJmpBoot     = 0   // x86 jump instruction (3-byte)
+	bsOEMName     = 3   // OEM name (8-byte)
+	bpbBytsPerSec = 11  // Sector size [byte] (WORD)
+	bpbSecPerClus = 13  // Cluster size [sector] (BYTE)
+	bpbRsvdSecCnt = 14  // Size of reserved area [sector] (WORD)
+	bpbNumFATs    = 16  // Number of FATs (BYTE)
+	bpbRootEntCnt = 17  // Size of root directory area for FAT [entry] (WORD)
+	bpbTotSec16   = 19  // Volume size (16-bit) [sector] (WORD)
+	bpbMedia      = 21  // Media descriptor byte (BYTE)
+	bpbFATSz16    = 22  // FAT size (16-bit) [sector] (WORD)
+	bpbSecPerTrk  = 24  // Number of sectors per track for int13h [sector] (WORD)
+	bpbNumHeads   = 26  // Number of heads for int13h (WORD)
+	bpbHiddSec    = 28  // Volume offset from top of the drive (DWORD)
+	bpbTotSec32   = 32  // Volume size (32-bit) [sector] (DWORD)
+	bsDrvNum      = 36  // Physical drive number for int13h (BYTE)
+	bsNTres       = 37  // WindowsNT error flag (BYTE)
+	bsBootSig     = 38  // Extended boot signature (BYTE)
+	bsVolID       = 39  // Volume serial number (DWORD)
+	bsVolLab      = 43  // Volume label string (8-byte)
+	bsFilSysType  = 54  // Filesystem type string (8-byte)
+	bsBootCode    = 62  // Boot code (448-byte)
+	bs55AA        = 510 // Signature word (WORD)
+
+	bpbFATSz32     = 36 // FAT32: FAT size [sector] (DWORD)
+	bpbExtFlags32  = 40 // FAT32: Extended flags (WORD)
+	bpbFSVer32     = 42 // FAT32: Filesystem version (WORD)
+	bpbRootClus32  = 44 // FAT32: Root directory cluster (DWORD)
+	bpbFSInfo32    = 48 // FAT32: Offset of FSINFO sector (WORD)
+	bpbBkBootSec32 = 50 // FAT32: Offset of backup boot sector (WORD)
+	bsDrvNum32     = 64 // FAT32: Physical drive number for int13h (BYTE)
+	bsNTres32      = 65 // FAT32: Error flag (BYTE)
+	bsBootSig32    = 66 // FAT32: Extended boot signature (BYTE)
+	bsVolID32      = 67 // FAT32: Volume serial number (DWORD)
+	bsVolLab32     = 71 // FAT32: Volume label string (8-byte)
+	bsFilSysType32 = 82 // FAT32: Filesystem type string (8-byte)
+	bsBootCode32   = 90 // FAT32: Boot code (420-byte)
+
+	bpbZeroedEx     = 11  // exFAT: MBZ field (53-byte)
+	bpbVolOfsEx     = 64  // exFAT: Volume offset from top of the drive [sector] (QWORD)
+	bpbTotSecEx     = 72  // exFAT: Volume size [sector] (QWORD)
+	bpbFatOfsEx     = 80  // exFAT: FAT offset from top of the volume [sector] (DWORD)
+	bpbFatSzEx      = 84  // exFAT: FAT size [sector] (DWORD)
+	bpbDataOfsEx    = 88  // exFAT: Data offset from top of the volume [sector] (DWORD)
+	bpbNumClusEx    = 92  // exFAT: Number of clusters (DWORD)
+	bpbRootClusEx   = 96  // exFAT: Root directory start cluster (DWORD)
+	bpbVolIDEx      = 100 // exFAT: Volume serial number (DWORD)
+	bpbFSVerEx      = 104 // exFAT: Filesystem version (WORD)
+	bpbVolFlagEx    = 106 // exFAT: Volume flags (WORD)
+	bpbBytsPerSecEx = 108 // exFAT: Log2 of sector size in unit of byte (BYTE)
+	bpbSecPerClusEx = 109 // exFAT: Log2 of cluster size in unit of sector (BYTE)
+	bpbNumFATsEx    = 110 // exFAT: Number of FATs (BYTE)
+	bpbDrvNumEx     = 111 // exFAT: Physical drive number for int13h (BYTE)
+	bpbPercInUseEx  = 112 // exFAT: Percent in use (BYTE)
+	bpbRsvdEx       = 113 // exFAT: Reserved (7-byte)
+	bsBootCodeEx    = 120 // exFAT: Boot code (390-byte)
+)
+
+const (
+	sizeDirEntry  = 32         // Size of a directory entry
+	maxDIR        = 0x200000   // Max size of FAT directory
+	maxDIREx      = 0x10000000 // Max size of exFAT directory
+	clustMaxFAT12 = 0xFF5      // Max FAT12 clusters (differs from specs, but right for real DOS/Windows behavior)
+	clustMaxFAT16 = 0xFFF5     // Max FAT16 clusters (differs from specs, but right for real DOS/Windows behavior)
+	clustMaxFAT32 = 0x0FFFFFF5 // Max FAT32 clusters (not specified, practical limit)
+	clustMaxExFAT = 0x7FFFFFFD // Max exFAT clusters (differs from specs, implementation limit)
 )
 
 // CT*: SBCS up-case tables.
