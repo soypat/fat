@@ -11,6 +11,7 @@ const (
 )
 
 const (
+	maxu32       uint32 = 0xffff_ffff
 	negative1_32        = 0xffff_ffff
 	badLBA       lba    = negative1_32
 	mask28bits   uint32 = 0x0FFF_FFFF
@@ -21,6 +22,18 @@ const (
 	mskRDDEM       = 0x05 // Replacement of the character collides with DDEM
 	mskLLEF        = 0x40 // Last long entry flag in LDIR_Ord
 
+	// Additional file attribute bits for internal use
+	amVOL   = 0x08 // Volume label
+	amLFN   = 0x0F // LFN entry
+	amMASK  = 0x3F // Mask of defined bits in FAT
+	amMASKX = 0x37 // Mask of defined bits in exFAT
+
+	// File attribute bits for directory entry (FILINFO.fattrib)
+	amRDO = 0x01 // Read only
+	amHID = 0x02 // Hidden
+	amSYS = 0x04 // System
+	amDIR = 0x10 // Directory
+	amARC = 0x20 // Archive
 )
 
 const (
@@ -104,6 +117,49 @@ const (
 	clustMaxFAT16 = 0xFFF5     // Max FAT16 clusters (differs from specs, but right for real DOS/Windows behavior)
 	clustMaxFAT32 = 0x0FFFFFF5 // Max FAT32 clusters (not specified, practical limit)
 	clustMaxExFAT = 0x7FFFFFFD // Max exFAT clusters (differs from specs, implementation limit)
+)
+
+// window offsets.
+const (
+	dirNameOff       = 0  // Short file name (11-byte)
+	dirAttrOff       = 11 // Attribute (BYTE)
+	dirNTresOff      = 12 // Lower case flag (BYTE)
+	dirCrtTime10Off  = 13 // Created time sub-second (BYTE)
+	dirCrtTimeOff    = 14 // Created time (DWORD)
+	dirLstAccDateOff = 18 // Last accessed date (WORD)
+	dirFstClusHIOff  = 20 // Higher 16-bit of first cluster (WORD)
+	dirModTimeOff    = 22 // Modified time (DWORD)
+	dirFstClusLOOff  = 26 // Lower 16-bit of first cluster (WORD)
+	dirFileSizeOff   = 28 // File size (DWORD)
+
+	ldirOrdOff        = 0  // LFN: LFN order and LLE flag (BYTE)
+	ldirAttrOff       = 11 // LFN: LFN attribute (BYTE)
+	ldirTypeOff       = 12 // LFN: Entry type (BYTE)
+	ldirChksumOff     = 13 // LFN: Checksum of the SFN (BYTE)
+	ldirFstClusLO_Off = 26 // LFN: MBZ field (WORD)
+
+	xdirType          = 0  // exFAT: Type of exFAT directory entry (BYTE)
+	xdirNumLabel      = 1  // exFAT: Number of volume label characters (BYTE)
+	xdirLabel         = 2  // exFAT: Volume label (11-WORD)
+	xdirCaseSum       = 4  // exFAT: Sum of case conversion table (DWORD)
+	xdirNumSec        = 1  // exFAT: Number of secondary entries (BYTE)
+	xdirSetSum        = 2  // exFAT: Sum of the set of directory entries (WORD)
+	xdirAttr          = 4  // exFAT: File attribute (WORD)
+	xdirCrtTime       = 8  // exFAT: Created time (DWORD)
+	xdirModTime       = 12 // exFAT: Modified time (DWORD)
+	xdirAccTime       = 16 // exFAT: Last accessed time (DWORD)
+	xdirCrtTime10     = 20 // exFAT: Created time subsecond (BYTE)
+	xdirModTime10     = 21 // exFAT: Modified time subsecond (BYTE)
+	xdirCrtTZ         = 22 // exFAT: Created timezone (BYTE)
+	xdirModTZ         = 23 // exFAT: Modified timezone (BYTE)
+	xdirAccTZ         = 24 // exFAT: Last accessed timezone (BYTE)
+	xdirGenFlags      = 33 // exFAT: General secondary flags (BYTE)
+	xdirNumName       = 35 // exFAT: Number of file name characters (BYTE)
+	xdirNameHash      = 36 // exFAT: Hash of file name (WORD)
+	xdirValidFileSize = 40 // exFAT: Valid file size (QWORD)
+	xdirFstClus       = 52 // exFAT: First cluster of the file data (DWORD)
+	xdirFileSize      = 56 // exFAT: File/Directory size (QWORD)
+
 )
 
 // CT*: SBCS up-case tables.
