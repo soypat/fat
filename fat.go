@@ -219,14 +219,15 @@ func (fsys *FS) OpenFile(dst *File, name string, mode fs.FileMode) error {
 	if dst == nil {
 		return frInvalidObject
 	}
-	var dj dir
-	var cl, bcs, clst, tm uint32
-	var sc lba
-	var ofs int64
-	dj.obj.fs = fsys
-	dj.obj.id = fsys.id
+	return nil
+	// var dj dir
+	// var cl, bcs, clst, tm uint32
+	// var sc lba
+	// var ofs int64
+	// dj.obj.fs = fsys
+	// dj.obj.id = fsys.id
 
-	return nil, nil
+	// return nil, nil
 }
 
 // mount initializes the FS with the given BlockDevice.
@@ -690,7 +691,7 @@ func (dp *dir) create_name(path string) fileResult {
 	for si = 0; si < di && lfn[si] == ' '; si++ {
 	}
 	if si > 0 || lfn[si] == '.' {
-		cf |= nsLOSS | nsLFN
+		cf |= nsLOSS | nsLFN // Leading dot.
 	}
 	for di > 0 && lfn[di-1] != '.' {
 		di-- // Find last dot (di<=si: no extension).
@@ -702,6 +703,40 @@ func (dp *dir) create_name(path string) fileResult {
 	i := 0
 	b := byte(0)
 	ni := 8
+	for {
+		wc = lfn[si]
+		si++
+		if wc == 0 {
+			break
+		}
+		if wc == ' ' || (wc == '.' && si != di) {
+			cf |= nsLOSS | nsLFN // Remove embedded spaces and dots.
+			continue
+		}
+		if i >= ni || si == di {
+			if ni == 11 {
+				cf |= nsLOSS | nsLFN // Possible name extension overflow.
+				break
+			}
+			if si != di {
+				cf |= nsLOSS | nsLFN // Possible name body overflow.
+			}
+			if si > di {
+				break
+			}
+			si = di
+			i = 8
+			ni = 11
+			b <<= 2
+			continue
+		}
+
+		if wc >= 0x80 {
+			// Possible extended character.
+			cf |= nsLFN // Flag LFN entry needs creation.
+
+		}
+	}
 	return frUnsupported
 }
 
