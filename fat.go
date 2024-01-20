@@ -80,6 +80,8 @@ type FS struct {
 	dbcTbl     [10]byte
 	id         uint16 // Filesystem mount ID. Serves to invalidate open files after mount.
 	perm       fs.FileMode
+	codepage   []byte // unicode conversion table.
+	exCvt      []byte //  points to _tblCT* corresponding to codepage table.
 }
 
 type objid struct {
@@ -703,6 +705,7 @@ func (dp *dir) create_name(path string) fileResult {
 	i := 0
 	b := byte(0)
 	ni := 8
+	codepageEnabled := len(fsys.codepage) != 0
 	for {
 		wc = lfn[si]
 		si++
@@ -731,13 +734,64 @@ func (dp *dir) create_name(path string) fileResult {
 			continue
 		}
 
-		if wc >= 0x80 {
+		if wc >= 0x80 && codepageEnabled {
 			// Possible extended character.
 			cf |= nsLFN // Flag LFN entry needs creation.
-
+			wc = ff_uni2oem(rune(wc), fsys.codepage)
+			if wc&0x80 != 0 {
+				wc = uint16(fsys.exCvt[wc&0x7f]) // Convert extended character to upper (SBCS).
+			}
+			wc = ff_uni2oem(rune(wc), fsys.codepage)
+			if wc&0x80 != 0 {
+				wc = uint16(fsys.exCvt[wc&0x7f]) // Convert extended character to upper (SBCS).
+			}
+		}
+		if wc >= 0x100 {
+			if i >= ni-1 {
+				// Possible field overflow.
+				cf |= nsLOSS | nsLFN
+				i = ni
+				continue
+			}
+			dp.fn[i] = byte(wc >> 8)
+			i++
+		} else {
+			if wc == 0 || strings.IndexByte("+,;=[]", byte(wc)) >= 0 {
+				wc = '_'             // Replace illegal characters for SFN.
+				cf |= nsLOSS | nsLFN // Flag the lossy conversion.
+			} else {
+				b |= b2u8(isUpper(wc)) << 1
+				if isLower(wc) {
+					b |= 1
+					wc -= 0x20
+				}
+			}
+		}
+		dp.fn[i] = byte(wc)
+		i++
+	}
+	if dp.fn[0] == mskDDEM {
+		// If the first character collides with DDEM, replace it with RDDEM.
+		dp.fn[0] = mskRDDEM
+	}
+	if ni == 8 {
+		// Shift capital flags if no extension.
+		b <<= 2
+	}
+	if b&0x0c == 0x0c || b&0x03 == 0x03 {
+		//  LFN entry needs to be created if composite capitals.
+		cf |= nsLFN
+	}
+	if cf&nsLFN == 0 {
+		if b&1 != 0 {
+			cf |= nsEXT
+		}
+		if b&4 != 0 {
+			cf |= nsBODY
 		}
 	}
-	return frUnsupported
+	dp.fn[nsFLAG] = cf // SFN is created into dp->fn[]
+	return frOK
 }
 
 func (dp *dir) sdi(ofs uint32) fileResult {
@@ -847,6 +901,13 @@ func b2i[T _integer](b bool) T {
 	return 0
 }
 
+func b2u8(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func trimSeparatorPrefix(s string) string {
 	for len(s) > 0 && isSep(s[0]) {
 		s = s[1:]
@@ -861,9 +922,9 @@ func trimChar(s string, char byte) string {
 	return s
 }
 
-func isUpper(c byte) bool            { return 'A' <= c && c <= 'Z' }
-func isLower(c byte) bool            { return 'a' <= c && c <= 'z' }
-func isDigit(c byte) bool            { return '0' <= c && c <= '9' }
+func isUpper[T _integer](c T) bool   { return 'A' <= c && c <= 'Z' }
+func isLower[T _integer](c T) bool   { return 'a' <= c && c <= 'z' }
+func isDigit[T _integer](c T) bool   { return '0' <= c && c <= '9' }
 func isSep[T _integer](c T) bool     { return c == '/' || c == '\\' }
 func isTermLFN[T _integer](c T) bool { return c < ' ' }
 func isSurrogate(c uint16) bool      { return c >= 0xd800 && c <= 0xdfff }

@@ -3,6 +3,7 @@ package fat
 import (
 	_ "embed"
 	"encoding/binary"
+	"unicode"
 )
 
 const (
@@ -14,8 +15,12 @@ const (
 	badLBA       lba    = negative1_32
 	mask28bits   uint32 = 0x0FFF_FFFF
 
-	offsetMBRTable = 446 // Offset of partition table in the MBR.
-	sizePartition  = 16  // Size of a partition table entry.
+	offsetMBRTable = 446  // Offset of partition table in the MBR.
+	sizePartition  = 16   // Size of a partition table entry.
+	mskDDEM        = 0xE5 // Deleted directory entry mark set to DIR_Name[0]
+	mskRDDEM       = 0x05 // Replacement of the character collides with DDEM
+	mskLLEF        = 0x40 // Last long entry flag in LDIR_Ord
+
 )
 
 const (
@@ -181,8 +186,9 @@ var (
 	cp_oem2uni_le []byte
 )
 
-// ff_uni2oem converts a unicode character to an OEM character, zero on error.
+// ff_uni2oem converts a unicode character to an ANSI/OEM character, zero on error.
 func ff_uni2oem(uni rune, codepage []byte) uint16 {
+	// TODO(soypat): Shouldn't uni be a uint16? It seems like we don't support 32bit unicode here...
 	if uni < 0x80 {
 		return uint16(uni)
 	} else if uni >= 0x10000 || len(codepage) != 256 {
@@ -220,4 +226,8 @@ func ff_codepage(code uint16) []byte {
 		}
 	}
 	return nil
+}
+
+func ff_wtoupper(c rune) rune {
+	return unicode.ToUpper(c)
 }
