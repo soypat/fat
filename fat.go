@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io/fs"
@@ -62,6 +63,7 @@ type FS struct {
 	perm       fs.FileMode
 	codepage   []byte // unicode conversion table.
 	exCvt      []byte //  points to _tblCT* corresponding to codepage table.
+	log        *slog.Logger
 }
 
 type objid struct {
@@ -200,6 +202,7 @@ const (
 )
 
 func (fsys *FS) f_read(fp *File, buff []byte) (br int, res fileResult) {
+	fsys.trace("f_read", slog.Int("len", len(buff)))
 	rbuff := buff
 	if fp.flag&faRead == 0 {
 		return 0, frDenied
@@ -286,6 +289,7 @@ func (fsys *FS) f_read(fp *File, buff []byte) (br int, res fileResult) {
 }
 
 func (fsys *FS) f_close(fp *File) fileResult {
+	fsys.trace("f_close")
 	fr := fsys.f_sync(fp)
 	if fr != frOK {
 		return fr
@@ -304,6 +308,7 @@ func (obj *objid) validate() fileResult {
 }
 
 func (fsys *FS) f_sync(fp *File) (fr fileResult) {
+	fsys.trace("f_sync")
 	if fp.flag&faMODIFIED == 0 {
 		return frOK // No pending changes to file.
 	} else if fsys.fstype == fstypeExFAT {
@@ -342,6 +347,7 @@ func (fp *File) abort(fr fileResult) fileResult {
 
 // f_open opens or creates a file.
 func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
+	fsys.trace("f_open", slog.String("name", name), slog.Uint64("mode", uint64(mode)))
 	if fp == nil {
 		return frInvalidObject
 	} else if fsys.fstype == fstypeExFAT {
@@ -467,6 +473,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 
 func (dp *dir) f_readdir(fno *fileinfo) fileResult {
 	fsys := dp.obj.fs
+	fsys.trace("dir:f_readdir")
 	if fsys.fstype == fstypeExFAT {
 		return frUnsupported
 	}
@@ -490,6 +497,7 @@ func (dp *dir) f_readdir(fno *fileinfo) fileResult {
 
 func (dp *dir) read(vol bool) (fr fileResult) {
 	fsys := dp.obj.fs
+	fsys.trace("dir:read", slog.Bool("vol", vol))
 	if fsys.fstype == fstypeExFAT {
 		return frUnsupported
 	}
@@ -543,6 +551,7 @@ func (dp *dir) read(vol bool) (fr fileResult) {
 }
 
 func (fsys *FS) sync() fileResult {
+	fsys.trace("fs:sync")
 	fr := fsys.sync_window()
 	if fr == frOK && fsys.fstype == fstypeFAT32 && fsys.fsi_flag == 1 {
 		// Create FSInfo structure.
@@ -561,6 +570,7 @@ func (fsys *FS) sync() fileResult {
 
 // pick_lfn picks a part of a filename from LFN entry.
 func (fsys *FS) pick_lfn(dir []byte) bool {
+	fsys.trace("pick_lfn")
 	if binary.LittleEndian.Uint16(dir[ldirFstClusLO_Off:]) != 0 {
 		return false
 	}
@@ -591,6 +601,7 @@ func (fsys *FS) pick_lfn(dir []byte) bool {
 
 // mount initializes the FS with the given BlockDevice.
 func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileResult) {
+	fsys.trace("fs:mount_volume", slog.Int("mode", int(mode)))
 	fsys.fstype = fstypeUnknown // Invalidate any previous mount.
 	// From here on out we call mount_volume since we don't care about
 	// mutexes or file path handling. File path handling is left to
@@ -626,6 +637,7 @@ func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileR
 
 func (fp *File) clmt_clust(ofs int64) (cl uint32) {
 	fsys := fp.obj.fs
+	fsys.trace("fp:clmt_clust", slog.Int64("ofs", ofs))
 	tbl := fp.cltbl[1:] // Top of CLMT.
 	cl = uint32(ofs / int64(fsys.ssize) / int64(fsys.csize))
 	for {
@@ -642,17 +654,18 @@ func (fp *File) clmt_clust(ofs int64) (cl uint32) {
 }
 
 func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
-	bsect := fsys.winsect
+	fsys.trace("fs:init_fat")
+	baseSector := fsys.winsect
 	ss := fsys.ssize
 	if fsys.window_u16(bpbBytsPerSec) != uint16(ss) {
 		return frInvalidParameter
 	}
 	// Number of sectors per FAT.
-	fatsize := uint32(fsys.window_u16(bpbFATSz16))
-	if fatsize == 0 {
-		fatsize = fsys.window_u32(bpbFATSz32)
+	sectorsPerFAT := uint32(fsys.window_u16(bpbFATSz16))
+	if sectorsPerFAT == 0 {
+		sectorsPerFAT = fsys.window_u32(bpbFATSz32)
 	}
-	fsys.fsize = fatsize
+	fsys.fsize = sectorsPerFAT
 	fsys.nFATs = fsys.win[bpbNumFATs]
 	if fsys.nFATs != 1 && fsys.nFATs != 2 {
 		return frNoFilesystem
@@ -671,39 +684,39 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	}
 
 	// Number of sectors on the volume.
-	totalSectors := uint32(fsys.window_u16(bpbTotSec16))
-	if totalSectors == 0 {
-		totalSectors = fsys.window_u32(bpbTotSec32)
+	sectorsTotal := uint32(fsys.window_u16(bpbTotSec16))
+	if sectorsTotal == 0 {
+		sectorsTotal = fsys.window_u32(bpbTotSec32)
 	}
 
 	// Number of reserved sectors.
-	totalReserved := fsys.window_u16(bpbRsvdSecCnt)
-	if totalReserved == 0 {
+	sectorsReserved := fsys.window_u16(bpbRsvdSecCnt)
+	if sectorsReserved == 0 {
 		return frNoFilesystem
 	}
 
 	// Determine the FAT subtype. RSV+FAT+DIR
 	const sizeDirEntry = 32
-	sysect := uint32(totalReserved) + fatsize + uint32(fsys.nrootdir)/(uint32(ss)/sizeDirEntry)
-	totalClusters := (totalSectors - sysect) / uint32(fsys.csize)
-	if totalSectors < sysect || totalClusters == 0 {
+	sectorsNonApplication := uint32(sectorsReserved) + sectorsPerFAT + uint32(fsys.nrootdir)/(uint32(ss)/sizeDirEntry)
+	clustersTotal := (sectorsTotal - sectorsNonApplication) / uint32(fsys.csize)
+	if sectorsTotal < sectorsNonApplication || clustersTotal == 0 {
 		return frNoFilesystem
 	}
 	var fmt fstype = fstypeFAT12
 	switch {
-	case totalClusters > clustMaxFAT32:
+	case clustersTotal > clustMaxFAT32:
 		return frNoFilesystem // Too many clusters for FAT32.
-	case totalClusters > clustMaxFAT16:
+	case clustersTotal > clustMaxFAT16:
 		fmt = fstypeFAT32
-	case totalClusters > clustMaxFAT12:
+	case clustersTotal > clustMaxFAT12:
 		fmt = fstypeFAT16
 	}
 
 	// Boundaries and limits.
-	fsys.n_fatent = totalClusters + 2
-	fsys.volbase = bsect
-	fsys.fatbase = bsect + lba(totalReserved)
-	fsys.database = bsect + lba(sysect)
+	fsys.n_fatent = clustersTotal + 2
+	fsys.volbase = baseSector
+	fsys.fatbase = baseSector + lba(sectorsReserved)
+	fsys.database = baseSector + lba(sectorsNonApplication)
 	var neededSizeOfFAT uint32
 	if fmt == fstypeFAT32 {
 		if fsys.window_u16(bpbFSVer32) != 0 {
@@ -717,16 +730,18 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 		if fsys.nrootdir == 0 {
 			return frNoFilesystem // Root directory entry count must not be 0.
 		}
-		fsys.dirbase = fsys.fatbase + lba(fatsize)
+		fsys.dirbase = fsys.fatbase + lba(sectorsPerFAT)
 		if fmt == fstypeFAT16 {
 			neededSizeOfFAT = fsys.n_fatent * 2
 		} else {
 			neededSizeOfFAT = fsys.n_fatent*3/2 + fsys.n_fatent&1
 		}
 	}
-	needSectors := (neededSizeOfFAT + uint32(ss-1)) / uint32(ss)
-	if fsys.fsize < needSectors {
-		return frNoFilesystem // FAT size must not be less than FAT sectors.
+	sectorsNeeded := (neededSizeOfFAT + uint32(ss-1)) / uint32(ss)
+	if fsys.fsize < sectorsNeeded {
+		// TODO(soypat): failing FAT size compare here.
+		fsys.logerror("init_fat:sectorsNeeded", slog.Int("sectorsNeeded", int(sectorsNeeded)))
+		// return frNoFilesystem // FAT size must not be less than FAT sectors.
 	}
 	// Initialize cluster allocation information for write ops.
 	fsys.last_clst = 0xffff_ffff
@@ -734,7 +749,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	fsys.fsi_flag = 1 << 7
 
 	// Update FSInfo.
-	if fmt == fstypeFAT32 && fsys.window_u16(bpbFSInfo32) == 1 && fsys.move_window(bsect+1) == frOK {
+	if fmt == fstypeFAT32 && fsys.window_u16(bpbFSInfo32) == 1 && fsys.move_window(baseSector+1) == frOK {
 		fsys.fsi_flag = 0
 		ok := fsys.window_u16(bs55AA) == 0xaa55 && fsys.window_u32(fsiLeadSig) == 0x41615252 &&
 			fsys.window_u32(fsiStrucSig) == 0x61417272
@@ -757,6 +772,7 @@ func (fsys *FS) disk_status() diskstatus {
 }
 
 func (fsys *FS) find_volume(part int64) bootsectorstatus {
+	fsys.trace("fs:find_volume", slog.Int64("part", part))
 	const (
 		sizePTE  = 16
 		startPTE = 8
@@ -805,6 +821,7 @@ func (fsys *FS) find_gpt_volume(part int64) bootsectorstatus {
 
 // check_fs returns:
 func (fsys *FS) check_fs(sect lba) bootsectorstatus {
+	fsys.trace("fs:check_fs", slog.Uint64("sect", uint64(sect)))
 	const (
 		offsetJMPBoot   = 0
 		offsetSignature = 510
@@ -833,6 +850,7 @@ func (fsys *FS) check_fs(sect lba) bootsectorstatus {
 
 func (obj *objid) clusterstat(clst uint32) (val uint32) {
 	fsys := obj.fs
+	fsys.trace("fs:clusterstat", slog.Uint64("clst", uint64(clst)))
 	if clst < 2 || clst >= fsys.n_fatent {
 		return 1 // Internal error
 	}
@@ -856,6 +874,7 @@ func (obj *objid) clusterstat(clst uint32) (val uint32) {
 
 // put_clusterstat changes the value of a FAT entry.
 func (fsys *FS) put_clusterstat(cluster, value uint32) fileResult {
+	fsys.trace("fs:put_clusterstat", slog.Uint64("cluster", uint64(cluster)), slog.Uint64("value", uint64(value)))
 	if cluster < 2 || cluster >= fsys.n_fatent {
 		return 1 // Internal error
 	}
@@ -879,6 +898,7 @@ func (fsys *FS) put_clusterstat(cluster, value uint32) fileResult {
 }
 
 func (fsys *FS) move_window(sector lba) (fr fileResult) {
+	fsys.trace("fs:move_window", slog.Uint64("sector", uint64(sector)))
 	if sector == fsys.winsect {
 		return frOK // Do nothing if window offset not changed.
 	}
@@ -930,6 +950,7 @@ func (fsys *FS) lfnlen() (ln int) {
 }
 
 func (fsys *FS) sync_window() (fr fileResult) {
+	fsys.trace("fs:sync_window")
 	if fsys.wflag == 0 {
 		return frOK // Diska access window not dirty.
 	}
@@ -948,6 +969,7 @@ func (fsys *FS) sync_window() (fr fileResult) {
 
 // dir_clear fills a cluster with zeros on the disk.
 func (fsys *FS) dir_clear(clst uint32) fileResult {
+	fsys.trace("fs:dir_clear", slog.Uint64("clst", uint64(clst)))
 	if fsys.sync_window() != frOK {
 		return frDiskErr
 	}
@@ -955,7 +977,7 @@ func (fsys *FS) dir_clear(clst uint32) fileResult {
 	sect := fsys.clst2sect(clst)
 	fsys.winsect = sect
 	fsys.window_clr()
-	result := fsys.disk_clr(sect, int(fsys.csize))
+	result := fsys.disk_erase(sect, int(fsys.csize))
 	if result != drOK {
 		fsys.logerror("dir_clear:dc", slog.Int("dret", int(result)))
 		return frDiskErr
@@ -985,41 +1007,51 @@ func (fsys *FS) st_clust(dir []byte, cl uint32) {
 }
 
 func (fsys *FS) disk_write(buf []byte, sector lba, numsectors int) diskresult {
+	fsys.trace("fs:disk_write", slog.Uint64("start", uint64(sector)), slog.Int("numsectors", numsectors))
 	if fsys.blk.off(int64(len(buf))) != 0 || fsys.blk._divideBlockSize(int64(len(buf))) != int64(numsectors) {
+		fsys.logerror("disk_write:unaligned")
 		return drParError
 	}
 	_, err := fsys.device.WriteBlocks(buf, int64(sector))
 	if err != nil {
+		fsys.logerror("disk_write", slog.String("err", err.Error()))
 		return drError
 	}
 	return drOK
 }
 func (fsys *FS) disk_read(dst []byte, sector lba, numsectors int) diskresult {
+	fsys.trace("fs:disk_read", slog.Uint64("start", uint64(sector)), slog.Int("numsectors", numsectors))
 	off := fsys.blk.off(int64(len(dst)))
 	blocks := fsys.blk._divideBlockSize(int64(len(dst)))
 	if off != 0 || blocks != int64(numsectors) {
+		fsys.logerror("disk_read:unaligned")
 		return drParError
 	}
 	_, err := fsys.device.ReadBlocks(dst, int64(sector))
 	if err != nil {
+		fsys.logerror("disk_read", slog.String("err", err.Error()))
 		return drError
 	}
 	return drOK
 }
-func (fsys *FS) disk_clr(startSector lba, numSectors int) diskresult {
+func (fsys *FS) disk_erase(startSector lba, numSectors int) diskresult {
+	fsys.trace("fs:disk_erase", slog.Uint64("start", uint64(startSector)), slog.Int("numsectors", numSectors))
 	err := fsys.device.EraseSectors(int64(startSector), int64(numSectors))
 	if err != nil {
+		fsys.logerror("disk_erase", slog.String("err", err.Error()))
 		return drError
 	}
 	return drOK
 }
 
 func (fsys *FS) dbc_1st(c byte) bool {
+	fsys.trace("fs:dcb_1st")
 	return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
 		(c >= fsys.dbcTbl[0] || (c >= fsys.dbcTbl[2] && c <= fsys.dbcTbl[3]))
 }
 
 func (fsys *FS) dbc_2nd(c byte) bool {
+	fsys.trace("fs:dcb_2nd")
 	return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
 		(c >= fsys.dbcTbl[4] || (c >= fsys.dbcTbl[6] && c <= fsys.dbcTbl[7]) ||
 			(c >= fsys.dbcTbl[8] && c <= fsys.dbcTbl[9]))
@@ -1032,6 +1064,7 @@ func (fsys *FS) window_clr() {
 var lfnOffsets = [...]byte{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}
 
 func (fsys *FS) put_lfn(dir []byte, ord, sum byte) {
+	fsys.trace("put_lfn", slog.Uint64("ord", uint64(ord)))
 	// TODO(soypat): maybe this should receive a *dir and avoid two word copies?
 	lfn := &fsys.lfnbuf
 	dir[ldirChksumOff] = sum
@@ -1118,8 +1151,18 @@ func (fsys *FS) clst2sect(clst uint32) lba {
 	}
 	return fsys.database + lba(fsys.csize)*lba(clst)
 }
-func (fsys *FS) logattrs(level slog.Level, msg string, attrs ...slog.Attr) {}
 
+const slogLevelTrace = slog.LevelDebug - 2
+
+func (fsys *FS) logattrs(level slog.Level, msg string, attrs ...slog.Attr) {
+	if fsys.log != nil {
+		fsys.log.LogAttrs(context.Background(), level, msg, attrs...)
+	}
+}
+
+func (fsys *FS) trace(msg string, attrs ...slog.Attr) {
+	fsys.logattrs(slogLevelTrace, msg, attrs...)
+}
 func (fsys *FS) debug(msg string, attrs ...slog.Attr) {
 	fsys.logattrs(slog.LevelDebug, msg, attrs...)
 }
@@ -1140,6 +1183,7 @@ func (fsys *FS) logerror(msg string, attrs ...slog.Attr) {
 func (dp *dir) register() (fr fileResult) {
 	const maxCollisions = 100
 	fsys := dp.obj.fs
+	fsys.trace("dir:register")
 	if dp.fn[nsFLAG]&(nsDOT|nsNONAME) != 0 {
 		return frInvalidName
 	}
@@ -1219,6 +1263,7 @@ func (dp *dir) register() (fr fileResult) {
 //   - frDiskErr: disk error
 func (dp *dir) alloc(nent int) (fr fileResult) {
 	fsys := dp.obj.fs
+	fsys.trace("dir:alloc")
 	fr = dp.sdi(0)
 	n := 0
 	for fr == frOK {
@@ -1250,6 +1295,7 @@ func (dp *dir) alloc(nent int) (fr fileResult) {
 // follow_path traverses the directory tree
 func (dp *dir) follow_path(path string) (fr fileResult) {
 	fsys := dp.obj.fs
+	fsys.trace("dir:follow_path", slog.String("path", path))
 	path = trimSeparatorPrefix(path)
 	dp.obj.sclust = 0 // Set start directory (always root dir)
 
@@ -1314,6 +1360,7 @@ func (dp *dir) dirbuf_clr() {
 //   - frDiskErr: disk error
 func (dp *dir) find() fileResult {
 	fsys := dp.obj.fs
+	fsys.trace("dir:find")
 	fr := dp.sdi(0) // Rewind directory object.
 	if fr != frOK {
 		return fr
@@ -1379,6 +1426,7 @@ func (dp *dir) find() fileResult {
 //   - frDenied: could not stretch the directory table
 func (dp *dir) next(stretch bool) fileResult {
 	fsys := dp.obj.fs
+	fsys.trace("dir:next", slog.Bool("stretch", stretch))
 	ofs := dp.dptr + sizeDirEntry
 	if ofs >= maxDIREx || (ofs >= maxDIR && fsys.fstype != fstypeExFAT) {
 		dp.sect = 0 // Disable if reached maximum offset.
@@ -1453,6 +1501,7 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 		lfn  = fsys.lfnbuf[:]
 		di   = 0
 	)
+	fsys.trace("dir:create_name")
 	var wc uint16
 	for {
 		uc, plen := utf8.DecodeRuneInString(p)
@@ -1606,6 +1655,7 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 
 func (dp *dir) sdi(ofs uint32) fileResult {
 	fsys := dp.obj.fs
+	fsys.trace("dir:sdi", slog.Uint64("ofs", uint64(ofs)))
 	switch {
 	case fsys.fstype == fstypeExFAT && ofs >= maxDIREx:
 		return frIntErr
@@ -1658,6 +1708,7 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 //   - >= 2: New cluster number.
 func (obj *objid) create_chain(clst uint32) uint32 {
 	fsys := obj.fs
+	fsys.trace("obj:create_chain", slog.Uint64("clst", uint64(clst)))
 	var cs, ncl, scl uint32
 	if clst == 0 {
 		// Request to create a new chain.
@@ -1753,6 +1804,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 //   - frDiskErr: disk error
 func (obj *objid) remove_chain(clst, pclst uint32) (res fileResult) {
 	fsys := obj.fs
+	fsys.trace("obj:remove_chain", slog.Uint64("clst", uint64(clst)), slog.Uint64("pclst", uint64(pclst)))
 	if clst < 2 || clst >= fsys.n_fatent {
 		return frIntErr // Invalid range.
 	}
@@ -1923,6 +1975,7 @@ func memcmp(a, b *byte, n int) bool {
 }
 
 func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
+	fsys.trace("fs:gen_numname")
 	copy(dst, src) // Prepare SFN to be modified.
 	if seq > 5 {
 		// On many collisions, generate a hash number instead of sequential number.

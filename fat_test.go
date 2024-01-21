@@ -2,19 +2,31 @@ package fat
 
 import (
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
+	"os"
 )
 
 func ExampleRead() {
 	var fs FS
-	dev := DefaultFATByteBlocks(16)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slogLevelTrace,
+	}))
+	// fs.log = log // Uncomment to see debug output.
+	dev := DefaultFATByteBlocks(32000)
 	fr := fs.mount_volume(dev, uint16(dev.blk.size()), faRead|faWrite)
 	if fr != frOK {
-		log.Fatal("mount failed:" + fr.Error())
+		log.Error("mount failed:" + fr.Error())
+		return
 	}
+	var fp File
 
-	//Output:
-
+	fr = fs.f_open(&fp, "test.txt\x00", faRead|faWrite|faCreateNew)
+	if fr != frOK {
+		log.Error("open failed:" + fr.Error())
+		return
+	}
+	fmt.Println("opened file OK!")
 }
 
 func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
@@ -42,7 +54,8 @@ func (b *BytesBlocks) ReadBlocks(dst []byte, startBlock int64) (int, error) {
 	off := startBlock * b.blk.size()
 	end := off + int64(len(dst))
 	if end > int64(len(b.buf)) {
-		return 0, errors.New("read past end of buffer")
+		return 0, fmt.Errorf("read past end of buffer: %d > %d", end, len(b.buf))
+		// return 0, errors.New("read past end of buffer")
 	}
 
 	return copy(dst, b.buf[off:end]), nil
@@ -56,7 +69,8 @@ func (b *BytesBlocks) WriteBlocks(data []byte, startBlock int64) (int, error) {
 	off := startBlock * b.blk.size()
 	end := off + int64(len(data))
 	if end > int64(len(b.buf)) {
-		return 0, errors.New("write past end of buffer")
+		return 0, fmt.Errorf("write past end of buffer: %d > %d", end, len(b.buf))
+		// return 0, errors.New("write past end of buffer")
 	}
 
 	return copy(b.buf[off:end], data), nil
