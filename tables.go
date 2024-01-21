@@ -3,6 +3,7 @@ package fat
 import (
 	_ "embed"
 	"encoding/binary"
+	"io/fs"
 	"unicode"
 )
 
@@ -11,6 +12,32 @@ const (
 )
 
 const (
+	modeRead fs.FileMode = 1 << iota
+	modeWrite
+)
+
+type accessmode = uint8
+
+const (
+	faRead         accessmode = 0b01
+	faWrite        accessmode = 0b10
+	faOpenExisting accessmode = 0
+)
+
+const (
+	faCreateNew accessmode = 1 << (iota + 2)
+	faCreateAlways
+	faOpenAlways
+	faOpenAppend accessmode = 0x30
+	// Internal use file access:
+
+	faSEEKEND  = 0x20 // Seek to end of the file on file open
+	faMODIFIED = 0x40 // File has been modified
+	faDIRTY    = 0x80 // FIL.buf[] needs to be written-back
+)
+
+const (
+	maxu16              = 0xffff
 	maxu32       uint32 = 0xffff_ffff
 	negative1_32        = 0xffff_ffff
 	badLBA       lba    = negative1_32
@@ -286,4 +313,47 @@ func ff_codepage(code uint16) []byte {
 
 func ff_wtoupper(c rune) rune {
 	return unicode.ToUpper(c)
+}
+
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[frOK-0]
+	_ = x[frDiskErr-1]
+	_ = x[frIntErr-2]
+	_ = x[frNotReady-3]
+	_ = x[frNoFile-4]
+	_ = x[frNoPath-5]
+	_ = x[frInvalidName-6]
+	_ = x[frDenied-7]
+	_ = x[frExist-8]
+	_ = x[frInvalidObject-9]
+	_ = x[frWriteProtected-10]
+	_ = x[frInvalidDrive-11]
+	_ = x[frNotEnabled-12]
+	_ = x[frNoFilesystem-13]
+	_ = x[frMkfsAborted-14]
+	_ = x[frTimeout-15]
+	_ = x[frLocked-16]
+	_ = x[frNotEnoughCore-17]
+	_ = x[frTooManyOpenFiles-18]
+	_ = x[frInvalidParameter-19]
+	_ = x[frUnsupported-20]
+	_ = x[frClosed-21]
+	_ = x[frGeneric-22]
+}
+
+// generated with command:
+//
+//	stringer -type=fileResult -linecomment -output=stringer_fileResult.go
+const _fileResult_name = "succeededa hard error occurred in the low level disk I/O layerassertion failedthe physical drive cannot workcould not find the filecould not find the paththe path name format is invalidaccess denied due to prohibited access or directory fullaccess denied due to prohibited accessthe file/directory object is invalidthe physical drive is write protectedthe logical drive number is invalidthe volume has no work areathere is no valid FAT volumethe f_mkfs() aborted due to any problemcould not get a grant to access the volume within defined periodthe operation is rejected according to the file sharing policyLFN working buffer could not be allocatednumber of open files > FF_FS_LOCKgiven parameter is invalidthe operation is not supportedthe file is closedfat generic error"
+
+var _fileResult_index = [...]uint16{0, 9, 62, 78, 108, 131, 154, 185, 241, 279, 315, 352, 387, 414, 442, 481, 545, 607, 648, 681, 707, 737, 755, 772}
+
+func (i fileResult) String() string {
+	if i < 0 || i >= fileResult(len(_fileResult_index)-1) {
+		return "<unknown fat.fileResult>"
+	}
+	return _fileResult_name[_fileResult_index[i]:_fileResult_index[i+1]]
 }
