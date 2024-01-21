@@ -15,8 +15,8 @@ import (
 // var _ fs.FS = (*FS)(nil)
 
 type BlockDevice interface {
-	ReadBlocks(dst []byte, startBlock int64) error
-	WriteBlocks(data []byte, startBlock int64) error
+	ReadBlocks(dst []byte, startBlock int64) (int, error)
+	WriteBlocks(data []byte, startBlock int64) (int, error)
 	EraseSectors(startBlock, numBlocks int64) error
 	// Mode returns 0 for no connection/prohibited access, 1 for read-only, 3 for read-write.
 	Mode() accessmode
@@ -289,15 +289,15 @@ func (fsys *FS) f_close(fp *File) fileResult {
 	fr := fsys.f_sync(fp)
 	if fr != frOK {
 		return fr
-	} else if fr = fp.validate(); fr != frOK {
+	} else if fr = fp.obj.validate(); fr != frOK {
 		return fr
 	}
 	fp.obj.fs = nil
 	return frOK
 }
 
-func (fp *File) validate() fileResult {
-	if fp == nil || fp.obj.fs == nil || fp.obj.id != fp.obj.fs.id {
+func (obj *objid) validate() fileResult {
+	if obj.fs == nil || obj.id != obj.fs.id {
 		return frInvalidObject
 	}
 	return frOK
@@ -465,6 +465,83 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	return res
 }
 
+func (dp *dir) f_readdir(fno *fileinfo) fileResult {
+	fsys := dp.obj.fs
+	if fsys.fstype == fstypeExFAT {
+		return frUnsupported
+	}
+	fr := dp.obj.validate()
+	if fr != frOK {
+		return fr
+	}
+	if fno == nil {
+		fr = dp.sdi(0)
+	} else {
+		fr = dp.read(false)
+		if fr == frNoFile {
+			fr = frOK
+		}
+		if fr == frOK {
+
+		}
+	}
+	return fr
+}
+
+func (dp *dir) read(vol bool) (fr fileResult) {
+	fsys := dp.obj.fs
+	if fsys.fstype == fstypeExFAT {
+		return frUnsupported
+	}
+	var ord, sum byte
+	for dp.sect != 0 {
+		fr = fsys.move_window(dp.sect)
+		if fr != frOK {
+			break
+		}
+		b := dp.dir[dirNameOff]
+		if b == 0 {
+			fr = frNoFile
+			break
+		}
+		// TODO: implement exFAT here.
+		attr := dp.dir[dirAttrOff] & amMASK
+		dp.obj.attr = attr
+		if b == mskDDEM || b == '.' || (attr&^amARC == amVOL) != vol {
+			// Entry without valid data.
+			ord = 0xff
+		} else {
+			if attr == amLFN {
+				if b&mskLLEF != 0 {
+					sum = dp.dir[ldirChksumOff]
+					b &^= mskLLEF
+					ord = b
+					dp.blk_ofs = dp.dptr
+				}
+				// Store LFN validity.
+				if b == ord && sum == dp.dir[ldirChksumOff] && fsys.pick_lfn(dp.dir) {
+					ord--
+				} else {
+					ord = 0xff
+				}
+			} else {
+				if ord != 0 || sum != sum_sfn(dp.dir) {
+					dp.blk_ofs = maxu32 // No LFN.
+				}
+				break
+			}
+		}
+		fr = dp.next(false)
+		if fr != frOK {
+			break
+		}
+	}
+	if fr != frOK {
+		dp.sect = 0 // Terminate read op on EOT.
+	}
+	return fr
+}
+
 func (fsys *FS) sync() fileResult {
 	fr := fsys.sync_window()
 	if fr == frOK && fsys.fstype == fstypeFAT32 && fsys.fsi_flag == 1 {
@@ -480,6 +557,36 @@ func (fsys *FS) sync() fileResult {
 		fsys.fsi_flag = 0
 	}
 	return fr
+}
+
+// pick_lfn picks a part of a filename from LFN entry.
+func (fsys *FS) pick_lfn(dir []byte) bool {
+	if binary.LittleEndian.Uint16(dir[ldirFstClusLO_Off:]) != 0 {
+		return false
+	}
+	i := 13 * int((dir[ldirOrdOff]&mskLLEF)-1) // Offset in LFN buffer.
+	var wc uint16
+	var s int
+	for wc = 1; s < 13; s++ {
+		uc := binary.LittleEndian.Uint16(dir[lfnOffsets[s]:])
+		if wc != 0 {
+			if i >= lfnBufSize+1 {
+				return false
+			}
+			fsys.lfnbuf[i] = uc
+			wc = uc
+		} else if uc != maxu16 {
+			return false
+		}
+	}
+	if dir[ldirOrdOff]&mskLLEF != 0 && wc != 0 {
+		// Put terminator if last LFN part and not terminated.
+		if i >= lfnBufSize+1 {
+			return false
+		}
+		fsys.lfnbuf[i] = 0
+	}
+	return true
 }
 
 // mount initializes the FS with the given BlockDevice.
@@ -537,11 +644,11 @@ func (fp *File) clmt_clust(ofs int64) (cl uint32) {
 func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	bsect := fsys.winsect
 	ss := fsys.ssize
-	if fsys.window_u32(bpbBytsPerSec) != uint32(ss) {
+	if fsys.window_u16(bpbBytsPerSec) != uint16(ss) {
 		return frInvalidParameter
 	}
 	// Number of sectors per FAT.
-	fatsize := fsys.window_u32(bpbFATSz16)
+	fatsize := uint32(fsys.window_u16(bpbFATSz16))
 	if fatsize == 0 {
 		fatsize = fsys.window_u32(bpbFATSz32)
 	}
@@ -564,7 +671,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	}
 
 	// Number of sectors on the volume.
-	var totalSectors uint32 = uint32(fsys.window_u16(bpbTotSec16))
+	totalSectors := uint32(fsys.window_u16(bpbTotSec16))
 	if totalSectors == 0 {
 		totalSectors = fsys.window_u32(bpbTotSec32)
 	}
@@ -597,7 +704,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	fsys.volbase = bsect
 	fsys.fatbase = bsect + lba(totalReserved)
 	fsys.database = bsect + lba(sysect)
-	var sizebFAT uint32
+	var neededSizeOfFAT uint32
 	if fmt == fstypeFAT32 {
 		if fsys.window_u16(bpbFSVer32) != 0 {
 			return frNoFilesystem // Unsupported FAT subversion, must be 0.0.
@@ -605,19 +712,20 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 			return frNoFilesystem // Root directory entry count must be 0.
 		}
 		fsys.dirbase = lba(fsys.window_u32(bpbRootClus32))
-		sizebFAT = fsys.n_fatent * 4
+		neededSizeOfFAT = fsys.n_fatent * 4
 	} else {
 		if fsys.nrootdir == 0 {
 			return frNoFilesystem // Root directory entry count must not be 0.
 		}
 		fsys.dirbase = fsys.fatbase + lba(fatsize)
 		if fmt == fstypeFAT16 {
-			sizebFAT = fsys.n_fatent * 2
+			neededSizeOfFAT = fsys.n_fatent * 2
 		} else {
-			sizebFAT = fsys.n_fatent*3/2 + fsys.n_fatent&1
+			neededSizeOfFAT = fsys.n_fatent*3/2 + fsys.n_fatent&1
 		}
 	}
-	if fsys.fsize < (sizebFAT+uint32(ss-1))/uint32(ss) {
+	needSectors := (neededSizeOfFAT + uint32(ss-1)) / uint32(ss)
+	if fsys.fsize < needSectors {
 		return frNoFilesystem // FAT size must not be less than FAT sectors.
 	}
 	// Initialize cluster allocation information for write ops.
@@ -716,7 +824,7 @@ func (fsys *FS) check_fs(sect lba) bootsectorstatus {
 	if b != 0xEB && b != 0xE9 && b != 0xE8 {
 		// Not a FAT VBR, BS may be valid/invalid.
 		return 3 - b2i[bootsectorstatus](bsValid)
-	} else if bsValid && fsys.window_memcmp(offsetFileSys32, "FAT32   ") {
+	} else if bsValid && !fsys.window_memcmp(offsetFileSys32, "FAT32   ") {
 		return bootsectorstatusFAT // FAT32 VBR.
 	}
 	// TODO(soypat): Support early MS-DOS FAT.
@@ -794,7 +902,8 @@ func (fsys *FS) invalidate_window() {
 }
 
 func (fsys *FS) window_memcmp(off uint16, data string) bool {
-	return off+uint16(len(data)) <= uint16(len(fsys.win)) && unsafe.String((*byte)(unsafe.Pointer(&fsys.win[off])), len(data)) == data
+	areEqual := off+uint16(len(data)) <= uint16(len(fsys.win)) && unsafe.String((*byte)(unsafe.Pointer(&fsys.win[off])), len(data)) == data
+	return !areEqual
 }
 
 func (fsys *FS) window_u32(off uint16) uint32 {
@@ -876,12 +985,32 @@ func (fsys *FS) st_clust(dir []byte, cl uint32) {
 }
 
 func (fsys *FS) disk_write(buf []byte, sector lba, numsectors int) diskresult {
+	if fsys.blk.off(int64(len(buf))) != 0 || fsys.blk._divideBlockSize(int64(len(buf))) != int64(numsectors) {
+		return drParError
+	}
+	_, err := fsys.device.WriteBlocks(buf, int64(sector))
+	if err != nil {
+		return drError
+	}
 	return drOK
 }
 func (fsys *FS) disk_read(dst []byte, sector lba, numsectors int) diskresult {
+	off := fsys.blk.off(int64(len(dst)))
+	blocks := fsys.blk._divideBlockSize(int64(len(dst)))
+	if off != 0 || blocks != int64(numsectors) {
+		return drParError
+	}
+	_, err := fsys.device.ReadBlocks(dst, int64(sector))
+	if err != nil {
+		return drError
+	}
 	return drOK
 }
 func (fsys *FS) disk_clr(startSector lba, numSectors int) diskresult {
+	err := fsys.device.EraseSectors(int64(startSector), int64(numSectors))
+	if err != nil {
+		return drError
+	}
 	return drOK
 }
 
