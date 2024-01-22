@@ -81,7 +81,7 @@ type objid struct {
 type File struct {
 	obj      objid
 	flag     uint8
-	err      uint8 // abort flag (error code)
+	err      fileResult // abort flag (error code)
 	fptr     int64
 	clust    uint32
 	sect     lba
@@ -112,6 +112,7 @@ type fileinfo struct {
 	fsize   int64 // File Size.
 	fdate   uint16
 	ftime   uint16
+	fattrib byte
 	altname [sfnBufSize + 1]byte
 	fname   [lfnBufSize + 1]byte
 }
@@ -341,7 +342,151 @@ func (fsys *FS) f_sync(fp *File) (fr fileResult) {
 }
 
 func (fp *File) abort(fr fileResult) fileResult {
-	fp.err = uint8(fr)
+	fp.err = fr
+	return fr
+}
+
+func (fp *File) f_write(buf []byte) (bw int, fr fileResult) {
+	fr = fp.obj.validate()
+	if fr != frOK {
+		return 0, fr
+	} else if fp.err != frOK {
+		return 0, fp.err
+	} else if fp.flag&faWrite == 0 {
+		return 0, frWriteProtected
+	} else if fp.obj.fs.fstype == fstypeExFAT {
+		return 0, frUnsupported
+	}
+	fs := fp.obj.fs
+	btw := len(buf)
+	if fs.fstype != fstypeExFAT && fp.fptr+int64(btw) < fp.fptr {
+		// Make sure file does not reach over 4GB limit on non exFAT.
+		btw = int(int64(maxu32) - fp.fptr)
+	}
+
+	wbuff := buf
+	var wcnt int
+	var clst uint32
+outerLoop:
+	for btw > 0 {
+		btw -= wcnt
+		bw += wcnt
+		wbuff = wbuff[wcnt:]
+		fp.fptr += int64(wcnt)
+		fp.obj.objsize = max(fp.obj.objsize, fp.fptr)
+
+		if fs.modSS(uint32(fp.fptr)) == 0 {
+			// On the sector boundary?
+			csect := uint32(fp.fptr/int64(fs.ssize)) & uint32(fs.csize-1)
+			if csect == 0 {
+				if fp.fptr == 0 {
+					clst = fp.obj.sclust
+					if clst == 0 {
+						// No cluster allocated yet.
+						clst = fp.obj.create_chain(0)
+					}
+				} else {
+					// Middle or end of file.
+					clst = fp.obj.create_chain(fp.clust)
+				}
+				switch clst {
+				case 0:
+					// Could not allocate a new cluster (disk full)
+					break outerLoop
+				case 1:
+					return bw, fp.abort(frIntErr)
+				case maxu32:
+					return bw, fp.abort(frDiskErr)
+				}
+				fp.clust = clst // Update current cluster.
+				if fp.obj.sclust == 0 {
+					// Set cluster if is the first write.
+					fp.obj.sclust = clst
+				}
+			}
+			if fp.flag&faDIRTY != 0 {
+				// Write-back sector cache if needed.
+				if fs.disk_write(fp.buf[:], fp.sect, 1) != drOK {
+					return bw, fp.abort(frDiskErr)
+				}
+				fp.flag &^= faDIRTY
+			}
+			sect := fs.clst2sect(fp.clust)
+			if sect == 0 {
+				return bw, fp.abort(frIntErr)
+			}
+			sect += lba(csect)
+			cc := fs.divSS(uint32(btw))
+			if cc > 0 {
+				if csect+cc > uint32(fs.csize) {
+					cc = uint32(fs.csize) - csect // clip at cluster boundary.
+				}
+				if fs.disk_write(wbuff, sect, int(cc)) != drOK {
+					return bw, fp.abort(frDiskErr)
+				}
+				off := fp.sect - sect
+				if off < lba(cc) {
+					// Refill sector cache if it gets invalidated by the disk_write().
+					copy(fp.buf[:], wbuff[off*lba(fs.ssize):(off+1)*lba(fs.ssize)])
+					fp.flag &^= faDIRTY
+				}
+				wcnt = int(cc) * int(fs.ssize)
+				continue
+			}
+			// Fill sector cache with file data.
+			if fp.sect != sect && fp.fptr < fp.obj.objsize &&
+				fs.disk_read(fp.buf[:], sect, 1) != drOK {
+				return bw, fp.abort(frDiskErr)
+			}
+			fp.sect = sect
+		}
+		modss := int(fs.modSS(uint32(fp.fptr)))
+		wcnt = int(fs.ssize) - modss // Remaining bytes in sector.
+		if wcnt > btw {
+			wcnt = btw // Clip it by btw.
+		}
+		copy(fp.buf[modss:], wbuff[:wcnt]) // fit data to the sector.
+		fp.flag |= faDIRTY
+	}
+	fp.flag |= faMODIFIED
+	return bw, fr
+}
+
+func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
+	if dp == nil {
+		return frInvalidObject
+	} else if fs.fstype == fstypeExFAT {
+		return frUnsupported
+	}
+	dp.obj.fs = fs
+
+	fr = dp.follow_path(path)
+	if fr != frOK {
+		if fr == frNoFile {
+			fr = frNoPath
+		}
+		dp.obj.fs = nil
+		return fr
+	}
+
+	if dp.fn[nsFLAG]&nsNONAME == 0 {
+		if dp.obj.attr&amDIR != 0 {
+			// TODO(soypat): implement exFAT here.
+			dp.obj.sclust = fs.ld_clust(dp.dir) // Get object allocation info.
+		} else {
+			fr = frNoPath
+		}
+	}
+	if fr == frOK {
+		dp.obj.id = fs.id
+		fr = dp.sdi(0) // Rewind directory.
+	}
+	if fr == frNoFile {
+		fr = frNoPath
+	}
+	if fr != frOK {
+		dp.obj.fs = nil
+	}
 	return fr
 }
 
@@ -484,12 +629,19 @@ func (dp *dir) f_readdir(fno *fileinfo) fileResult {
 	if fno == nil {
 		fr = dp.sdi(0)
 	} else {
+		// Read an item.
 		fr = dp.read(false)
 		if fr == frNoFile {
-			fr = frOK
+			fr = frOK // Ignore end of directory.
 		}
 		if fr == frOK {
-
+			dp.get_fileinfo(fno)
+			fr = dp.next(false) // Increment index for next.
+			if fr == frNoFile {
+				// Ignore end of directory until next call
+				// since we succesfully read fileinfo.
+				fr = frOK
+			}
 		}
 	}
 	return fr
@@ -1093,6 +1245,7 @@ func (fsys *FS) put_lfn(dir []byte, ord, sum byte) {
 }
 
 func (fs *FS) change_bitmap(clst, ncl uint32, bv bool) fileResult {
+	fs.trace("fs:change_bitmap", slog.Uint64("clst", uint64(clst)), slog.Uint64("ncl", uint64(ncl)), slog.Bool("bv", bv))
 	clst -= 2 // First bit corresponds to cluster #2.
 	clstDiv8 := clst / 8
 	sect := fs.bitbase + lba(fs.divSS(clstDiv8))
@@ -1699,6 +1852,110 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 	dp.sect += lba(fsys.divSS(ofs))
 	dp.dir = fsys.win[fsys.modSS(ofs):]
 	return frOK
+}
+
+func (dp *dir) get_fileinfo(fno *fileinfo) {
+	fsys := dp.obj.fs
+
+	fno.fname[0] = 0 // Invalidate.
+	if dp.sect == 0 {
+		return // End of directory reached.
+	} else if fsys.fstype == fstypeExFAT {
+		return
+	}
+	// TODO(soypat): implement exFAT here.
+	var si, di int
+	var wc uint16
+	if dp.blk_ofs != maxu32 {
+		// Get LFN if available.
+		var hs uint16
+		for fsys.lfnbuf[si] != 0 {
+			wc = fsys.lfnbuf[si]
+			if hs == 0 && isSurrogate(wc) {
+				hs = wc // Low surrogate.
+				continue
+			}
+			nw := put_utf8(rune(hs)<<16|rune(wc), fno.fname[di:])
+			if nw == 0 {
+				// Buffer overflow or wrong char.
+				di = 0
+				break
+			}
+			di += nw
+			hs = 0
+		}
+		if hs != 0 {
+			di = 0 // Broken surrogate pair.
+		}
+		fno.fname[di] = 0 // Terminate the LFN.
+	}
+
+	si, di = 0, 0
+	for si < 11 {
+		// Get SFN.
+		wc = uint16(dp.dir[si])
+		si++
+		if wc == ' ' {
+			continue
+		} else if wc == mskRDDEM {
+			wc = mskDDEM
+		}
+		if si == 9 && di < sfnBufSize {
+			fno.altname[di] = '.'
+			di++
+		}
+		if fsys.dbc_1st(byte(wc)) && si != 8 && si != 11 && fsys.dbc_2nd(dp.dir[si]) {
+			wc = wc<<8 | uint16(dp.dir[si])
+			si++
+		}
+		wc = ff_oem2uni(wc, fsys.codepage)
+		if wc == 0 {
+			di = 0 // Wrong char.
+			break
+		}
+		nw := put_utf8(rune(wc), fno.altname[di:sfnBufSize-di])
+		if nw == 0 {
+			di = 0
+			break
+		}
+		di += nw
+	}
+	if fno.fname[0] == 0 {
+		// LFN is invalid: altname needs to be copied to fname.
+		if di == 0 {
+			fno.fname[di] = '?'
+			di++
+		} else {
+			si, di = 0, 0
+			lcf := byte(nsBODY)
+			for fno.altname[si] != 0 {
+				wc = uint16(fno.altname[si])
+				if wc == '.' {
+					lcf = nsEXT
+				}
+				if isUpper(wc) && dp.dir[dirNTresOff]&lcf != 0 {
+					wc += 0x20
+				}
+				fno.fname[di] = byte(wc)
+			}
+		}
+		fno.fname[di] = 0 // Terminate the LFN.
+		if dp.dir[dirNTresOff] == 0 {
+			// Altname not needed nor case info exists.
+			fno.altname[0] = 0
+		}
+	}
+	fno.fattrib = dp.dir[dirAttrOff] & amMASK
+	fno.fsize = int64(binary.LittleEndian.Uint32(dp.dir[dirFileSizeOff:]))
+	fno.ftime = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff:])
+	fno.fdate = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff+2:])
+}
+
+func put_utf8(r rune, buf []byte) int {
+	if utf8.RuneLen(r) > len(buf) {
+		return 0
+	}
+	return int(utf8.EncodeRune(buf, r))
 }
 
 // create_chain stretches or creates a chain. Returns:
