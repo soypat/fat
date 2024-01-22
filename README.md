@@ -3,12 +3,11 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/soypat/fat)](https://goreportcard.com/report/github.com/soypat/fat)
 [![codecov](https://codecov.io/gh/soypat/fat/branch/main/graph/badge.svg)](https://codecov.io/gh/soypat/fat)
 [![Go](https://github.com/soypat/fat/actions/workflows/go.yml/badge.svg)](https://github.com/soypat/fat/actions/workflows/go.yml)
-[![sourcegraph](https://sourcegraph.com/github.com/soypat/fat/-/badge.svg)](https://sourcegraph.com/
-github.com/soypat/fat?badge)
+[![sourcegraph](https://sourcegraph.com/github.com/soypat/fat/-/badge.svg)](https://sourcegraph.com/github.com/soypat/fat?badge)
 [![License: BSD-3Clause](https://img.shields.io/badge/License-BSD-3.svg)](https://opensource.org/licenses/bsd-3-clause)
 
 A File Allocation Table implementation written in Go. Intended for use in embedded systems 
-with SD cards, USBs, MMC devices and also usable with an in-RAM representation. Inspired by FatFs.
+with SD cards, USBs, MMC devices and also usable with an in-RAM representation. Inspired by [FatFs](https://github.com/abbrev/fatfs).
 
 This is a *Work in Progress*.
 
