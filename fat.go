@@ -202,7 +202,8 @@ const (
 	bootsectorstatusDiskError
 )
 
-func (fsys *FS) f_read(fp *File, buff []byte) (br int, res fileResult) {
+func (fp *File) f_read(buff []byte) (br int, res fileResult) {
+	fsys := fp.obj.fs
 	fsys.trace("f_read", slog.Int("len", len(buff)))
 	rbuff := buff
 	if fp.flag&faRead == 0 {
@@ -289,7 +290,8 @@ func (fsys *FS) f_read(fp *File, buff []byte) (br int, res fileResult) {
 	return br, frOK
 }
 
-func (fsys *FS) f_close(fp *File) fileResult {
+func (fp *File) f_close() fileResult {
+	fsys := fp.obj.fs
 	fsys.trace("f_close")
 	fr := fsys.f_sync(fp)
 	if fr != frOK {

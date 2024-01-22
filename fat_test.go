@@ -8,6 +8,10 @@ import (
 )
 
 func ExampleRead() {
+	const (
+		filename = "test.txt\x00"
+		data     = "abc123"
+	)
 	var fs FS
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slogLevelTrace,
@@ -21,12 +25,52 @@ func ExampleRead() {
 	}
 	var fp File
 
-	fr = fs.f_open(&fp, "test.txt\x00", faRead|faWrite|faCreateNew)
+	fr = fs.f_open(&fp, filename, faRead|faWrite|faCreateNew)
 	if fr != frOK {
-		log.Error("open failed:" + fr.Error())
+		log.Error("open for write failed:" + fr.Error())
 		return
 	}
-	fmt.Println("opened file OK!")
+
+	n, fr := fp.f_write([]byte(data))
+	if fr != frOK {
+		log.Error("write failed:" + fr.Error())
+		return
+	}
+	if n != len(data) {
+		log.Error("write failed: short write")
+		return
+	}
+	fmt.Printf("start file data: %q...\n", string(dev.buf[fp.sect*512:][:20]))
+	fr = fp.f_close()
+	if fr != frOK {
+		log.Error("close failed:" + fr.Error())
+		return
+	}
+	fmt.Printf("start file data: %q...\n", string(dev.buf[fp.sect*512:][:20]))
+	// Read back data.
+	fr = fs.f_open(&fp, filename, faRead)
+	if fr != frOK {
+		log.Error("open for read failed:" + fr.Error())
+		return
+	}
+	buf := make([]byte, len(data))
+	n, fr = fp.f_read(buf)
+	if fr != frOK {
+		log.Error("read failed:" + fr.Error())
+		return
+	}
+	got := string(buf[:n])
+	if got != data {
+		log.Error("read failed", slog.String("got", got), slog.String("want", data))
+		return
+	}
+	fr = fp.f_close()
+	if fr != frOK {
+		log.Error("close failed:" + fr.Error())
+		return
+	}
+	fmt.Println("wrote and read back file OK!")
+	// Output: wrote and read back file OK!
 }
 
 func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
