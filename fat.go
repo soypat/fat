@@ -1981,8 +1981,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 		if cs < 2 {
 			fsys.logerror("create_chain:insanity")
 			return 1
-		}
-		if cs == maxu32 || cs < fsys.n_fatent {
+		} else if cs == maxu32 || cs < fsys.n_fatent {
 			// Disk error or it is already followed by next cluster.
 			return cs
 		}
@@ -2018,20 +2017,18 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 		for {
 			ncl++
 			if ncl >= fsys.n_fatent {
-				{
-					ncl = 2
-					if ncl > scl {
-						return 0 // No free cluster.
-					}
-				}
-				cs = obj.clusterstat(ncl)
-				if cs == 0 {
-					break
-				} else if cs == 1 || cs == maxu32 {
-					return cs // Return error as is.
-				} else if ncl == scl {
+				ncl = 2
+				if ncl > scl {
 					return 0 // No free cluster.
 				}
+			}
+			cs = obj.clusterstat(ncl)
+			if cs == 0 {
+				break
+			} else if cs == 1 || cs == maxu32 {
+				return cs // Return error as is.
+			} else if ncl == scl {
+				return 0 // No free cluster.
 			}
 		}
 	}

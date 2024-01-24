@@ -24,7 +24,14 @@ func ExampleRead() {
 		return
 	}
 	var fp File
-
+	// var root dir
+	// fr = fs.f_opendir(&root, "rootdir")
+	// if fr != frOK {
+	// 	log.Error("open dir failed:" + fr.Error())
+	// 	return
+	// }
+	// fmt.Println("ok")
+	// return
 	fr = fs.f_open(&fp, filename, faRead|faWrite|faCreateNew)
 	if fr != frOK {
 		log.Error("open for write failed:" + fr.Error())
@@ -70,6 +77,7 @@ func ExampleRead() {
 		return
 	}
 	fmt.Println("wrote and read back file OK!")
+	// Output: aa
 }
 
 func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
