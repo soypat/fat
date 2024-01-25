@@ -1544,7 +1544,7 @@ func (dp *dir) find() fileResult {
 			dp.blk_ofs = 0xffff_ffff // Reset LFN sequence.
 		} else {
 			if attr == amLFN {
-				if dp.fn[nsFLAG]&nsNOLFN != 0 {
+				if dp.fn[nsFLAG]&nsNOLFN == 0 {
 					if c&mskLLEF != 0 {
 						// Start of LFN sequence.
 						sum = dp.dir[ldirChksumOff]
