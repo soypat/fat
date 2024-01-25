@@ -824,7 +824,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	if fsys.nFATs != 1 && fsys.nFATs != 2 {
 		return frNoFilesystem
 	}
-
+	sectorsPerFAT *= uint32(fsys.nFATs)
 	fsys.csize = uint16(fsys.win[bpbSecPerClus])
 	if fsys.csize == 0 || (fsys.csize&(fsys.csize-1)) != 0 {
 		// Zero or not power of two.
@@ -1824,7 +1824,6 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 			clst = uint32(fsys.dirbase)
 			dp.obj.stat = 0 // exFAT: Root dir has a FAT chain.
 		}
-
 	}
 
 	if clst == 0 {

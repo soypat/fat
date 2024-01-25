@@ -1,11 +1,50 @@
 package fat
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"testing"
 )
+
+func TestFileInfo(t *testing.T) {
+	dev := DefaultFATByteBlocks(32000)
+	var fs FS
+	attachLogger(&fs)
+	ss := uint16(dev.blk.size())
+	fr := fs.mount_volume(dev, ss, faRead|faWrite)
+	if fr != frOK {
+		t.Fatal(fr.Error())
+	}
+	var fp File
+	fr = fs.f_open(&fp, "rootfile\x00", faRead)
+	if fr != frOK {
+		t.Fatal(fr.Error())
+	}
+
+	return
+	var dir dir
+	fr = fs.f_opendir(&dir, "")
+	if fr != frOK {
+		t.Fatal(fr.Error())
+	}
+	var finfo fileinfo
+	fr = dir.f_readdir(&finfo)
+	if fr != frOK {
+		t.Fatal(fr.Error())
+	}
+	t.Errorf("finfo: %+v", finfo)
+}
+
+func attachLogger(fs *FS) *slog.Logger {
+	fs.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slogLevelTrace,
+	}))
+	return fs.log
+}
 
 func ExampleRead() {
 	const (
@@ -13,25 +52,16 @@ func ExampleRead() {
 		data     = "abc123"
 	)
 	var fs FS
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slogLevelTrace,
-	}))
-	fs.log = log // Uncomment to see debug output.
+	log := attachLogger(&fs)
 	dev := DefaultFATByteBlocks(32000)
 	fr := fs.mount_volume(dev, uint16(dev.blk.size()), faRead|faWrite)
 	if fr != frOK {
 		log.Error("mount failed:" + fr.Error())
 		return
 	}
+
 	var fp File
-	// var root dir
-	// fr = fs.f_opendir(&root, "rootdir")
-	// if fr != frOK {
-	// 	log.Error("open dir failed:" + fr.Error())
-	// 	return
-	// }
-	// fmt.Println("ok")
-	// return
+
 	fr = fs.f_open(&fp, filename, faRead|faWrite|faCreateNew)
 	if fr != frOK {
 		log.Error("open for write failed:" + fr.Error())
@@ -47,13 +77,13 @@ func ExampleRead() {
 		log.Error("write failed: short write")
 		return
 	}
-	fmt.Printf("start file data: %q...\n", string(dev.buf[fp.sect*512:][:20]))
+
 	fr = fp.f_close()
 	if fr != frOK {
 		log.Error("close failed:" + fr.Error())
 		return
 	}
-	fmt.Printf("start file data: %q...\n", string(dev.buf[fp.sect*512:][:20]))
+
 	// Read back data.
 	fr = fs.f_open(&fp, filename, faRead)
 	if fr != frOK {
@@ -77,7 +107,6 @@ func ExampleRead() {
 		return
 	}
 	fmt.Println("wrote and read back file OK!")
-	// Output: aa
 }
 
 func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
@@ -152,6 +181,21 @@ func (b *BytesBlocks) Size() int64 {
 // Mode returns 0 for no connection/prohibited access, 1 for read-only, 3 for read-write.
 func (b *BytesBlocks) Mode() uint8 {
 	return 3
+}
+
+func fatInitDiff(data []byte) (s string) {
+	max := int64(len(data)) / 512
+	for block := int64(0); block < max; block++ {
+		b := data[block*512 : (block+1)*512]
+		expect := fatInit[block]
+		if !bytes.Equal(b, expect[:]) {
+			s += fmt.Sprintf("block %d got!=want:\n%s\n%s\n", block, hex.Dump(b), hex.Dump(expect[:]))
+		}
+	}
+	if len(s) == 0 {
+		return "no differences"
+	}
+	return s
 }
 
 // Start of clean slate FAT32 filesystem image with name `keylargo`, 8GB in size.
