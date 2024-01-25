@@ -10,24 +10,19 @@ import (
 	"testing"
 )
 
-func TestFileInfo(t *testing.T) {
-	dev := DefaultFATByteBlocks(32000)
-	var fs FS
-	attachLogger(&fs)
-	ss := uint16(dev.blk.size())
-	fr := fs.mount_volume(dev, ss, faRead|faWrite)
-	if fr != frOK {
-		t.Fatal(fr.Error())
-	}
+func TestOpenRootFile(t *testing.T) {
+	fs, _ := initTestFAT()
 	var fp File
-	fr = fs.f_open(&fp, "rootfile\x00", faRead)
+	fr := fs.f_open(&fp, "rootfile\x00", faRead)
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
+}
 
-	return
+func TestFileInfo(t *testing.T) {
+	fs, _ := initTestFAT()
 	var dir dir
-	fr = fs.f_opendir(&dir, "")
+	fr := fs.f_opendir(&dir, "")
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
@@ -36,7 +31,6 @@ func TestFileInfo(t *testing.T) {
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
-	t.Errorf("finfo: %+v", finfo)
 }
 
 func attachLogger(fs *FS) *slog.Logger {
@@ -196,6 +190,18 @@ func fatInitDiff(data []byte) (s string) {
 		return "no differences"
 	}
 	return s
+}
+
+func initTestFAT() (*FS, *BytesBlocks) {
+	dev := DefaultFATByteBlocks(32000)
+	var fs FS
+	attachLogger(&fs)
+	ss := uint16(dev.blk.size())
+	fr := fs.mount_volume(dev, ss, faRead|faWrite)
+	if fr != frOK {
+		panic(fr.Error())
+	}
+	return &fs, dev
 }
 
 // Start of clean slate FAT32 filesystem image with name `keylargo`, 8GB in size.
