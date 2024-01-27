@@ -10,22 +10,37 @@ import (
 	"testing"
 )
 
-func TestOpenRootFile(t *testing.T) {
+func TestRead(t *testing.T) {
 	fs, _ := initTestFAT()
-	var fp File
-	fr := fs.f_open(&fp, "rootfile\x00", faRead)
-	if fr != frOK {
-		t.Fatal(fr.Error())
+	var rootFile File
+	fr := fs.f_open(&rootFile, "rootfile", faRead)
+	mustBeOK(t, fr)
+
+	buf := make([]byte, 512)
+	n, fr := rootFile.f_read(buf)
+	mustBeOK(t, fr)
+
+	got := string(buf[:n])
+	if got != rootFileContents {
+		t.Errorf("mismatched rootfile contents:\n%q\n%q\n", got, rootFileContents)
+	}
+
+	var dirfile File
+	fr = fs.f_open(&dirfile, "rootdir/dirfile", faRead)
+	mustBeOK(t, fr)
+	n, fr = dirfile.f_read(buf)
+	mustBeOK(t, fr)
+	got = string(buf[:n])
+	if got != dirFileContents {
+		t.Errorf("mismatched dirfile contents:\n%q\n%q\n", got, dirFileContents)
 	}
 }
 
 func TestFileInfo(t *testing.T) {
 	fs, _ := initTestFAT()
 	var dir dir
-	fr := fs.f_opendir(&dir, "rootdir\x00")
-	if fr != frOK {
-		t.Fatal(fr.Error())
-	}
+	fr := fs.f_opendir(&dir, "rootdir")
+	mustBeOK(t, fr)
 	var finfo fileinfo
 	fr = dir.f_readdir(&finfo)
 	if fr != frOK {
@@ -43,7 +58,7 @@ func TestFileInfo(t *testing.T) {
 
 func ExampleRead() {
 	const (
-		filename = "test.txt\x00"
+		filename = "test.txt"
 		data     = "abc123"
 	)
 	var fs FS
@@ -118,6 +133,12 @@ func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
 	return &BytesBlocks{
 		blk: blk,
 		buf: buf,
+	}
+}
+func mustBeOK(t *testing.T, fr fileResult) {
+	t.Helper()
+	if fr != frOK {
+		t.Fatal(fr.Error())
 	}
 }
 
@@ -312,3 +333,6 @@ var fatInit = map[int64][512]byte{
 		0x35, 0x20, 0x6c, 0x69, 0x6e, 0x65, 0x73, 0x2e, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // |5 lines.........|
 	},
 }
+
+const rootFileContents = "this is\nthe root file\n"
+const dirFileContents = "this is not\nnot the root\nnot the root file\nnope. \nThis file has 5 lines.\n"

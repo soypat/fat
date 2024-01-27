@@ -224,7 +224,7 @@ func (fp *File) f_read(buff []byte) (br int, res fileResult) {
 		br += rcnt
 		rbuff = rbuff[rcnt:]
 		fp.fptr += int64(rcnt)
-		if btr < 0 {
+		if btr <= 0 {
 			break
 		}
 		if fp.fptr%ss == 0 {
@@ -278,14 +278,12 @@ func (fp *File) f_read(buff []byte) (br int, res fileResult) {
 			}
 			fp.sect = sect
 		}
-		rcnt = int(ss) - int(fp.fptr%ss)
+		modfptr := int(fp.fptr % ss)
+		rcnt = int(ss) - modfptr
 		if rcnt > btr {
 			rcnt = btr
 		}
-		if fsys.move_window(fp.sect) != frOK {
-			return br, fp.abort(frDiskErr)
-		}
-		copy(rbuff[:rcnt], fp.buf[fp.fptr%ss:])
+		copy(rbuff[:rcnt], fp.buf[modfptr:])
 	}
 	return br, frOK
 }
@@ -460,6 +458,8 @@ func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 	} else if fs.fstype == fstypeExFAT {
 		return frUnsupported
 	}
+	path += "\x00" // TODO(soypat): change internal algorithms to non-null terminated strings.
+
 	dp.obj.fs = fs
 
 	fr = dp.follow_path(path)
@@ -495,6 +495,7 @@ func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 // f_open opens or creates a file.
 func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fsys.trace("f_open", slog.String("name", name), slog.Uint64("mode", uint64(mode)))
+	name += "\x00" // TODO(soypat): change internal algorithms to non-null terminated strings.
 	if fp == nil {
 		return frInvalidObject
 	} else if fsys.fstype == fstypeExFAT {
