@@ -728,7 +728,7 @@ func (fsys *FS) pick_lfn(dir []byte) bool {
 	if binary.LittleEndian.Uint16(dir[ldirFstClusLO_Off:]) != 0 {
 		return false
 	}
-	i := 13 * int((dir[ldirOrdOff]&mskLLEF)-1) // Offset in LFN buffer.
+	i := 13 * int((dir[ldirOrdOff]&^mskLLEF)-1) // Offset in LFN buffer.
 	var wc uint16
 	var s int
 	for wc = 1; s < 13; s++ {
@@ -739,6 +739,7 @@ func (fsys *FS) pick_lfn(dir []byte) bool {
 			}
 			fsys.lfnbuf[i] = uc
 			wc = uc
+			i++
 		} else if uc != maxu16 {
 			return false
 		}
@@ -1874,6 +1875,7 @@ func (dp *dir) get_fileinfo(fno *fileinfo) {
 		var hs uint16
 		for fsys.lfnbuf[si] != 0 {
 			wc = fsys.lfnbuf[si]
+			si++
 			if hs == 0 && isSurrogate(wc) {
 				hs = wc // Low surrogate.
 				continue

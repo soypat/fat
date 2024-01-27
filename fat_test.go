@@ -31,6 +31,7 @@ func TestFileInfo(t *testing.T) {
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
+	t.Errorf("%+v", finfo)
 }
 
 func attachLogger(fs *FS) *slog.Logger {
