@@ -784,7 +784,10 @@ func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileR
 	} else if fmt == bootsectorstatusNotFATInvalidBS || fmt == bootsectorstatusNotFATValidBS {
 		return frNoFilesystem
 	}
-
+	if fsys.dbcTbl == [10]byte{} {
+		// TODO(soypat): Codepages, use them.
+		fsys.dbcTbl = [10]byte{0x81, 0x9F, 0xE0, 0xFC, 0x40, 0x7E, 0x80, 0xFC}
+	}
 	if fmt == bootsectorstatusExFAT {
 		return fsys.init_exfat()
 	}
@@ -1201,16 +1204,28 @@ func (fsys *FS) disk_erase(startSector lba, numSectors int) diskresult {
 }
 
 func (fsys *FS) dbc_1st(c byte) bool {
-	fsys.trace("fs:dcb_1st")
-	return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
-		(c >= fsys.dbcTbl[0] || (c >= fsys.dbcTbl[2] && c <= fsys.dbcTbl[3]))
+	// fsys.trace("fs:dcb_1st")
+	if c >= fsys.dbcTbl[0] {
+		return c <= fsys.dbcTbl[1] || (c >= fsys.dbcTbl[2] && c <= fsys.dbcTbl[3])
+	}
+	return false
+	// TODO(soypat): Revise code page effect here.
+	// return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
+	// 	(c >= fsys.dbcTbl[0] || (c >= fsys.dbcTbl[2] && c <= fsys.dbcTbl[3]))
 }
 
 func (fsys *FS) dbc_2nd(c byte) bool {
-	fsys.trace("fs:dcb_2nd")
-	return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
-		(c >= fsys.dbcTbl[4] || (c >= fsys.dbcTbl[6] && c <= fsys.dbcTbl[7]) ||
-			(c >= fsys.dbcTbl[8] && c <= fsys.dbcTbl[9]))
+	// fsys.trace("fs:dcb_2nd")
+	dbc := &fsys.dbcTbl
+	if c >= dbc[4] {
+		return c <= dbc[5] || (c >= dbc[6] && c <= dbc[7]) ||
+			(c >= dbc[8] && c <= dbc[9])
+	}
+	return false
+	// TODO(soypat): Revise code page effect here.
+	// return (fsys.ffCodePage == 0 || fsys.ffCodePage >= 900) &&
+	// 	(c >= fsys.dbcTbl[4] || (c >= fsys.dbcTbl[6] && c <= fsys.dbcTbl[7]) ||
+	// 		(c >= fsys.dbcTbl[8] && c <= fsys.dbcTbl[9]))
 }
 
 func (fsys *FS) window_clr() {
@@ -1909,16 +1924,20 @@ func (dp *dir) get_fileinfo(fno *fileinfo) {
 			fno.altname[di] = '.'
 			di++
 		}
-		if fsys.dbc_1st(byte(wc)) && si != 8 && si != 11 && fsys.dbc_2nd(dp.dir[si]) {
+		b1 := fsys.dbc_1st(byte(wc))
+		b2 := fsys.dbc_2nd(dp.dir[si])
+		if b1 && si != 8 && si != 11 && b2 {
 			wc = wc<<8 | uint16(dp.dir[si])
 			si++
 		}
 		wc = ff_oem2uni(wc, fsys.codepage)
+
 		if wc == 0 {
 			di = 0 // Wrong char.
 			break
 		}
-		nw := put_utf8(rune(wc), fno.altname[di:sfnBufSize-di])
+
+		nw := put_utf8(rune(wc), fno.altname[di:sfnBufSize])
 		if nw == 0 {
 			di = 0
 			break
@@ -1942,6 +1961,8 @@ func (dp *dir) get_fileinfo(fno *fileinfo) {
 					wc += 0x20
 				}
 				fno.fname[di] = byte(wc)
+				si++
+				di++
 			}
 		}
 		fno.fname[di] = 0 // Terminate the LFN.
@@ -2327,6 +2348,28 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 			break
 		}
 	}
+}
+
+func (finfo *fileinfo) AlternateName() string {
+	return str(finfo.altname[:])
+}
+func (finfo *fileinfo) Name() string {
+	return str(finfo.fname[:])
+}
+
+func str(s []byte) string {
+	if len(s) == 0 {
+		return ""
+	}
+	var buf []byte
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == 0 || b >= 0x80 {
+			return string(buf)
+		}
+		buf = append(buf, byte(b))
+	}
+	return string(buf)
 }
 
 func str16(s []uint16) string {

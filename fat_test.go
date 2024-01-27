@@ -31,14 +31,14 @@ func TestFileInfo(t *testing.T) {
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
-	t.Errorf("%+v", finfo)
-}
-
-func attachLogger(fs *FS) *slog.Logger {
-	fs.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slogLevelTrace,
-	}))
-	return fs.log
+	name := finfo.Name()
+	if name != "dirfile" {
+		t.Errorf("mismatched name %q", name)
+	}
+	alt := finfo.AlternateName()
+	if alt != "DIRFILE" {
+		t.Errorf("mismatched alternate name: %q", alt)
+	}
 }
 
 func ExampleRead() {
@@ -203,6 +203,13 @@ func initTestFAT() (*FS, *BytesBlocks) {
 		panic(fr.Error())
 	}
 	return &fs, dev
+}
+
+func attachLogger(fs *FS) *slog.Logger {
+	fs.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slogLevelTrace,
+	}))
+	return fs.log
 }
 
 // Start of clean slate FAT32 filesystem image with name `keylargo`, 8GB in size.
