@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"io/fs"
 	"log/slog"
 	"math/bits"
 	"runtime"
@@ -18,9 +17,9 @@ import (
 type BlockDevice interface {
 	ReadBlocks(dst []byte, startBlock int64) (int, error)
 	WriteBlocks(data []byte, startBlock int64) (int, error)
-	EraseSectors(startBlock, numBlocks int64) error
+	EraseBlocks(startBlock, numBlocks int64) error
 	// Mode returns 0 for no connection/prohibited access, 1 for read-only, 3 for read-write.
-	Mode() accessmode
+	// Mode() accessmode
 }
 
 // sector index type.
@@ -60,7 +59,7 @@ type FS struct {
 	ffCodePage int
 	dbcTbl     [10]byte
 	id         uint16 // Filesystem mount ID. Serves to invalidate open files after mount.
-	perm       fs.FileMode
+	perm       Mode
 	codepage   []byte // unicode conversion table.
 	exCvt      []byte //  points to _tblCT* corresponding to codepage table.
 	log        *slog.Logger
@@ -108,7 +107,7 @@ const (
 	sfnBufSize = 12
 )
 
-type fileinfo struct {
+type FileInfo struct {
 	fsize   int64 // File Size.
 	fdate   uint16
 	ftime   uint16
@@ -207,6 +206,8 @@ func (fp *File) f_read(buff []byte) (br int, res fileResult) {
 	fsys.trace("f_read", slog.Int("len", len(buff)))
 	rbuff := buff
 	if fp.flag&faRead == 0 {
+		return 0, frDenied
+	} else if fsys.perm&ModeRead == 0 {
 		return 0, frDenied
 	}
 	remain := fp.obj.objsize - fp.fptr
@@ -356,6 +357,8 @@ func (fp *File) f_write(buf []byte) (bw int, fr fileResult) {
 		return 0, frWriteProtected
 	} else if fp.obj.fs.fstype == fstypeExFAT {
 		return 0, frUnsupported
+	} else if fp.obj.fs.perm&ModeWrite == 0 {
+		return 0, frWriteProtected
 	}
 	fs := fp.obj.fs
 	btw := len(buf)
@@ -500,6 +503,8 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 		return frInvalidObject
 	} else if fsys.fstype == fstypeExFAT {
 		return frUnsupported
+	} else if fsys.perm == 0 {
+		return frDenied
 	}
 
 	var dj dir
@@ -619,7 +624,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	return res
 }
 
-func (dp *dir) f_readdir(fno *fileinfo) fileResult {
+func (dp *dir) f_readdir(fno *FileInfo) fileResult {
 	fsys := dp.obj.fs
 	fsys.trace("dir:f_readdir")
 	if fsys.fstype == fstypeExFAT {
@@ -764,12 +769,7 @@ func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileR
 	// mutexes or file path handling. File path handling is left to
 	// the Go standard library which does a much better job than us.
 	// See `filepath` and `fs` standard library packages.
-	devMode := bd.Mode()
-	if devMode == 0 {
-		return frNotReady
-	} else if mode&devMode != mode {
-		return frDenied
-	}
+
 	blk, err := makeBlockIndexer(int(ssize))
 	if err != nil {
 		return frInvalidParameter
@@ -778,6 +778,7 @@ func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileR
 	fsys.id++ // Invalidate open files.
 	fsys.blk = blk
 	fsys.ssize = ssize
+	fsys.perm = Mode(mode)
 	fmt := fsys.find_volume(0)
 
 	if fmt == bootsectorstatusDiskError {
@@ -1167,6 +1168,9 @@ func (fsys *FS) st_clust(dir []byte, cl uint32) {
 }
 
 func (fsys *FS) disk_write(buf []byte, sector lba, numsectors int) diskresult {
+	if fsys.perm&ModeWrite == 0 {
+		return drWriteProtected
+	}
 	fsys.trace("fs:disk_write", slog.Uint64("start", uint64(sector)), slog.Int("numsectors", numsectors))
 	if fsys.blk.off(int64(len(buf))) != 0 || fsys.blk._divideBlockSize(int64(len(buf))) != int64(numsectors) {
 		fsys.logerror("disk_write:unaligned")
@@ -1196,7 +1200,7 @@ func (fsys *FS) disk_read(dst []byte, sector lba, numsectors int) diskresult {
 }
 func (fsys *FS) disk_erase(startSector lba, numSectors int) diskresult {
 	fsys.trace("fs:disk_erase", slog.Uint64("start", uint64(startSector)), slog.Int("numsectors", numSectors))
-	err := fsys.device.EraseSectors(int64(startSector), int64(numSectors))
+	err := fsys.device.EraseBlocks(int64(startSector), int64(numSectors))
 	if err != nil {
 		fsys.logerror("disk_erase", slog.String("err", err.Error()))
 		return drError
@@ -1871,7 +1875,7 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 	return frOK
 }
 
-func (dp *dir) get_fileinfo(fno *fileinfo) {
+func (dp *dir) get_fileinfo(fno *FileInfo) {
 	fsys := dp.obj.fs
 
 	fno.fname[0] = 0 // Invalidate.
@@ -2346,13 +2350,6 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 			break
 		}
 	}
-}
-
-func (finfo *fileinfo) AlternateName() string {
-	return str(finfo.altname[:])
-}
-func (finfo *fileinfo) Name() string {
-	return str(finfo.fname[:])
 }
 
 func str(s []byte) string {

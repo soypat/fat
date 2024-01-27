@@ -10,6 +10,27 @@ import (
 	"testing"
 )
 
+func TestForEachFile(t *testing.T) {
+	fs, _ := initTestFAT()
+	var dir Dir
+	err := fs.OpenDir(&dir, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := 0
+	err = dir.ForEachFile(func(fi *FileInfo) error {
+		i++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i != 2 {
+		t.Errorf("unexpected number of files: %d", i)
+
+	}
+}
+
 func TestWriteNew(t *testing.T) {
 	const filename = "deaconblues"
 	const writeData = "\nnew data\n"
@@ -132,7 +153,7 @@ func TestFileInfo(t *testing.T) {
 	var dir dir
 	fr := fs.f_opendir(&dir, "rootdir")
 	mustBeOK(t, fr)
-	var finfo fileinfo
+	var finfo FileInfo
 	fr = dir.f_readdir(&finfo)
 	if fr != frOK {
 		t.Fatal(fr.Error())
@@ -238,6 +259,8 @@ type BytesBlocks struct {
 	buf []byte
 }
 
+func (b *BytesBlocks) BlockSize() int { return int(b.blk.size()) }
+
 func (b *BytesBlocks) ReadBlocks(dst []byte, startBlock int64) (int, error) {
 	if b.blk.off(int64(len(dst))) != 0 {
 		return 0, errors.New("startBlock not aligned to block size")
@@ -268,7 +291,7 @@ func (b *BytesBlocks) WriteBlocks(data []byte, startBlock int64) (int, error) {
 
 	return copy(b.buf[off:end], data), nil
 }
-func (b *BytesBlocks) EraseSectors(startBlock, numBlocks int64) error {
+func (b *BytesBlocks) EraseBlocks(startBlock, numBlocks int64) error {
 	if startBlock < 0 || numBlocks <= 0 {
 		return errors.New("invalid erase parameters")
 	}
