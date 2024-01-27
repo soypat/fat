@@ -755,6 +755,7 @@ func (fsys *FS) pick_lfn(dir []byte) bool {
 
 // mount initializes the FS with the given BlockDevice.
 func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileResult) {
+	_ = str16(fsys.lfnbuf[:0]) // include str16 utility into build for debugging.
 	fsys.trace("fs:mount_volume", slog.Int("mode", int(mode)))
 	fsys.fstype = fstypeUnknown // Invalidate any previous mount.
 	// From here on out we call mount_volume since we don't care about
@@ -824,7 +825,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	if fsys.nFATs != 1 && fsys.nFATs != 2 {
 		return frNoFilesystem
 	}
-
+	sectorsPerFAT *= uint32(fsys.nFATs)
 	fsys.csize = uint16(fsys.win[bpbSecPerClus])
 	if fsys.csize == 0 || (fsys.csize&(fsys.csize-1)) != 0 {
 		// Zero or not power of two.
@@ -1544,7 +1545,7 @@ func (dp *dir) find() fileResult {
 			dp.blk_ofs = 0xffff_ffff // Reset LFN sequence.
 		} else {
 			if attr == amLFN {
-				if dp.fn[nsFLAG]&nsNOLFN != 0 {
+				if dp.fn[nsFLAG]&nsNOLFN == 0 {
 					if c&mskLLEF != 0 {
 						// Start of LFN sequence.
 						sum = dp.dir[ldirChksumOff]
@@ -1552,7 +1553,7 @@ func (dp *dir) find() fileResult {
 						ord = c
 						dp.blk_ofs = dp.dptr
 					}
-					if c == ord && sum == dp.dir[ldirChksumOff] {
+					if c == ord && sum == dp.dir[ldirChksumOff] && fsys.cmp_lfn(dp.dir[:]) {
 						ord--
 					} else {
 						ord = 0xff
@@ -1761,6 +1762,7 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 			}
 		}
 		if wc >= 0x100 {
+			// This is a DBC.
 			if i >= ni-1 {
 				// Possible field overflow.
 				cf |= nsLOSS | nsLFN
@@ -1824,7 +1826,6 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 			clst = uint32(fsys.dirbase)
 			dp.obj.stat = 0 // exFAT: Root dir has a FAT chain.
 		}
-
 	}
 
 	if clst == 0 {
@@ -2227,7 +2228,40 @@ func sum_sfn(sfn []byte) (sum byte) {
 }
 
 func memcmp(a, b *byte, n int) bool {
-	return unsafe.String(a, n) == unsafe.String(b, n)
+	return unsafe.String(a, n) != unsafe.String(b, n)
+}
+
+// cmp_lfn returns true if entry matches LFN.
+func (fsys *FS) cmp_lfn(dir []byte) bool {
+	fsys.trace("fs:cmp_lfn")
+	lfn := fsys.lfnbuf[:]
+	if binary.LittleEndian.Uint16(dir[ldirFstClusLO_Off:]) != 0 {
+		return false
+	}
+	i := int(dir[ldirOrdOff]&0x3F-1) * 13 // Offset in the LFN buffer.
+
+	var wc uint16 = 1
+	for s := 0; s < 13; s++ {
+		uc := binary.LittleEndian.Uint16(dir[lfnOffsets[s]:])
+		if wc != 0 {
+			// TODO: optimize branching below after validated.
+			lfnc := rune(lfn[i])
+			w1 := ff_wtoupper(rune(uc))
+			w2 := ff_wtoupper(lfnc)
+			if i >= lfnBufSize+1 || w1 != w2 {
+				return false
+			}
+			i++
+			wc = uc
+		} else {
+			if uc != 0xFFFF {
+				return false
+			}
+		}
+	}
+	return !(dir[ldirOrdOff]&mskLLEF != 0 && wc != 0 && lfn[i] != 0)
+	// TODO(soypat): check if below is equivalent:
+	// return dir[ldirOrdOff]&mskLLEF == 0 || wc == 0 || lfn[i] == 0
 }
 
 func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
@@ -2291,4 +2325,21 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 			break
 		}
 	}
+}
+
+func str16(s []uint16) string {
+	if len(s) == 0 {
+		return ""
+	}
+	var buf []byte
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == 0 || b >= utf8.RuneError {
+			return string(buf)
+		} else if b >= 0x80 {
+			buf = append(buf, byte(b>>8))
+		}
+		buf = append(buf, byte(b))
+	}
+	return string(buf)
 }
