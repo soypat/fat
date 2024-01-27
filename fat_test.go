@@ -22,7 +22,7 @@ func TestOpenRootFile(t *testing.T) {
 func TestFileInfo(t *testing.T) {
 	fs, _ := initTestFAT()
 	var dir dir
-	fr := fs.f_opendir(&dir, "")
+	fr := fs.f_opendir(&dir, "rootdir\x00")
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
