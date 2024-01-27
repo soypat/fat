@@ -10,6 +10,97 @@ import (
 	"testing"
 )
 
+func TestWriteNew(t *testing.T) {
+	const filename = "deaconblues"
+	const writeData = "\nnew data\n"
+	fs, _ := initTestFAT()
+	var fp File
+	fr := fs.f_open(&fp, filename, faWrite|faCreateNew)
+	mustBeOK(t, fr)
+
+	n, fr := fp.f_write([]byte(writeData))
+	mustBeOK(t, fr)
+	if n != len(writeData) {
+		t.Errorf("short write: %d != %d", n, len(writeData))
+	}
+
+	fr = fp.f_close()
+	mustBeOK(t, fr)
+
+	// Read back data.
+	fr = fs.f_open(&fp, filename, faRead)
+	mustBeOK(t, fr)
+	buf := make([]byte, len(writeData)+20)
+	n, fr = fp.f_read(buf)
+	mustBeOK(t, fr)
+	got := string(buf[:n])
+	if got != writeData {
+		t.Errorf("mismatched contents:\n%q\n%q\n", got, writeData)
+	}
+}
+
+func TestWriteExisting(t *testing.T) {
+	const filename = "rootfile"
+	const newData = "\nnew data\n"
+	fs, _ := initTestFAT()
+	var rootFile File
+	fr := fs.f_open(&rootFile, filename, faWrite)
+	mustBeOK(t, fr)
+
+	n, fr := rootFile.f_write([]byte(newData))
+	mustBeOK(t, fr)
+	if n != len(newData) {
+		t.Errorf("short write: %d != %d", n, len(newData))
+	}
+
+	// Sync changes.
+	fr = rootFile.f_close()
+	mustBeOK(t, fr)
+
+	// Read back data.
+	fr = fs.f_open(&rootFile, filename, faRead)
+	mustBeOK(t, fr)
+	buf := make([]byte, len(rootFileContents)+len(newData)+20)
+	n, fr = rootFile.f_read(buf)
+	mustBeOK(t, fr)
+	got := string(buf[:n])
+	want := newData + rootFileContents[len(newData):]
+	if got != want {
+		t.Errorf("mismatched contents:\n%q\n%q\n", got, want)
+	}
+}
+
+func TestWriteAppend(t *testing.T) {
+	const filename = "rootfile"
+	const newData = "\nnew data\n"
+	fs, _ := initTestFAT()
+	var rootFile File
+	fr := fs.f_open(&rootFile, filename, faWrite|faOpenAppend)
+	mustBeOK(t, fr)
+
+	n, fr := rootFile.f_write([]byte(newData))
+	mustBeOK(t, fr)
+	if n != len(newData) {
+		t.Errorf("short write: %d != %d", n, len(newData))
+	}
+
+	// Sync changes.
+	fr = rootFile.f_close()
+	mustBeOK(t, fr)
+
+	// Read back data.
+	fr = fs.f_open(&rootFile, filename, faRead)
+	mustBeOK(t, fr)
+	buf := make([]byte, len(rootFileContents)+len(newData)+20)
+	n, fr = rootFile.f_read(buf)
+	mustBeOK(t, fr)
+	got := string(buf[:n])
+	want := rootFileContents + newData
+	if got != want {
+		t.Errorf("mismatched contents:\n%q\n%q\n", got, want)
+	}
+}
+
 func TestRead(t *testing.T) {
 	fs, _ := initTestFAT()
 	var rootFile File
@@ -138,7 +229,7 @@ func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
 func mustBeOK(t *testing.T, fr fileResult) {
 	t.Helper()
 	if fr != frOK {
-		t.Fatal(fr.Error())
+		t.Fatalf("FR%d: %s", fr, fr.Error())
 	}
 }
 

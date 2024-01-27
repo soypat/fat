@@ -507,10 +507,10 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	res := dj.follow_path(name)
 	if res == frOK {
 		if dj.fn[nsFLAG]&nsNONAME != 0 {
-			res = frInvalidName
+			res = frInvalidName // Original directory.
 		}
 	}
-	if mode&(faCreateNew|faOpenAlways|faCreateNew) != 0 {
+	if mode&(faCreateAlways|faOpenAlways|faCreateNew) != 0 {
 		// Create a new file branch.
 		if res != frOK {
 			if res == frNoFile {
@@ -1392,13 +1392,13 @@ func (dp *dir) register() (fr fileResult) {
 	}
 	fr = dp.alloc(nent)
 	nent--
-	if fr != frOK && nent > 1 {
+	if fr == frOK && nent != 0 {
 		// Set LFN entry if needed.
-		nent--
 		fr = dp.sdi(dp.dptr - uint32(nent*sizeDirEntry))
 		if fr == frOK {
 			sum := sum_sfn(dp.fn[:])
 			for {
+				// Store LFN entries in bottom first.
 				fr = fsys.move_window(dp.sect)
 				if fr != frOK {
 					break
@@ -1407,11 +1407,8 @@ func (dp *dir) register() (fr fileResult) {
 				fsys.wflag = 1
 				const stretchTable = false
 				fr = dp.next(stretchTable)
-				if fr != frOK {
-					break
-				}
 				nent--
-				if nent == 0 {
+				if fr != frOK || nent <= 0 {
 					break
 				}
 			}
@@ -2290,7 +2287,7 @@ func (fsys *FS) cmp_lfn(dir []byte) bool {
 
 func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 	fsys.trace("fs:gen_numname")
-	copy(dst, src) // Prepare SFN to be modified.
+	copy(dst[:11], src) // Prepare SFN to be modified.
 	if seq > 5 {
 		// On many collisions, generate a hash number instead of sequential number.
 		sreg := seq
@@ -2345,7 +2342,7 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 			dst[j] = ' '
 		}
 		j++
-		if j < 8 {
+		if j >= 8 {
 			break
 		}
 	}
