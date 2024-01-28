@@ -98,24 +98,35 @@ func (fp *File) Write(buf []byte) (int, error) {
 
 // Close closes the file and syncs any unwritten data to the underlying device.
 func (fp *File) Close() error {
-	fr := fp.f_close()
+	fr := fp.obj.validate()
+	if fr != frOK {
+		return fr
+	}
+
+	fr = fp.f_close()
 	if fr != frOK {
 		return fr
 	}
 	return nil
 }
 
-// Sync syncs any unwritten data to the underlying device.
+// Sync commits the current contents of the file to the filesystem immediately.
 func (fp *File) Sync() error {
 	fr := fp.obj.validate()
 	if fr != frOK {
 		return fr
 	}
+
 	fr = fp.obj.fs.sync()
 	if fr != frOK {
 		return fr
 	}
 	return nil
+}
+
+// Mode returns the lowest 2 bits of the file's permission (read, write or both).
+func (fp *File) Mode() Mode {
+	return Mode(fp.flag & 3)
 }
 
 // OpenDir opens the named directory for reading.

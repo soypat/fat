@@ -168,69 +168,6 @@ func TestFileInfo(t *testing.T) {
 	}
 }
 
-func ExampleRead() {
-	const (
-		filename = "test.txt"
-		data     = "abc123"
-	)
-	var fs FS
-	log := attachLogger(&fs)
-	dev := DefaultFATByteBlocks(32000)
-	fr := fs.mount_volume(dev, uint16(dev.blk.size()), faRead|faWrite)
-	if fr != frOK {
-		log.Error("mount failed:" + fr.Error())
-		return
-	}
-
-	var fp File
-
-	fr = fs.f_open(&fp, filename, faRead|faWrite|faCreateNew)
-	if fr != frOK {
-		log.Error("open for write failed:" + fr.Error())
-		return
-	}
-
-	n, fr := fp.f_write([]byte(data))
-	if fr != frOK {
-		log.Error("write failed:" + fr.Error())
-		return
-	}
-	if n != len(data) {
-		log.Error("write failed: short write")
-		return
-	}
-
-	fr = fp.f_close()
-	if fr != frOK {
-		log.Error("close failed:" + fr.Error())
-		return
-	}
-
-	// Read back data.
-	fr = fs.f_open(&fp, filename, faRead)
-	if fr != frOK {
-		log.Error("open for read failed:" + fr.Error())
-		return
-	}
-	buf := make([]byte, len(data))
-	n, fr = fp.f_read(buf)
-	if fr != frOK {
-		log.Error("read failed:" + fr.Error())
-		return
-	}
-	got := string(buf[:n])
-	if got != data {
-		log.Error("read failed", slog.String("got", got), slog.String("want", data))
-		return
-	}
-	fr = fp.f_close()
-	if fr != frOK {
-		log.Error("close failed:" + fr.Error())
-		return
-	}
-	fmt.Println("wrote and read back file OK!")
-}
-
 func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
 	const defaultBlockSize = 512
 	blk, _ := makeBlockIndexer(defaultBlockSize)
@@ -327,24 +264,22 @@ func fatInitDiff(data []byte) (s string) {
 	}
 	return s
 }
-
 func initTestFAT() (*FS, *BytesBlocks) {
-	dev := DefaultFATByteBlocks(32000)
+	return initTestFATWithLogger(32000, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slogLevelTrace,
+	})))
+
+}
+func initTestFATWithLogger(size int64, log *slog.Logger) (*FS, *BytesBlocks) {
+	dev := DefaultFATByteBlocks(int(size))
 	var fs FS
-	attachLogger(&fs)
+	fs.log = log
 	ss := uint16(dev.blk.size())
-	fr := fs.mount_volume(dev, ss, faRead|faWrite)
-	if fr != frOK {
-		panic(fr.Error())
+	err := fs.Mount(dev, int(ss), ModeRW)
+	if err != nil {
+		panic(err)
 	}
 	return &fs, dev
-}
-
-func attachLogger(fs *FS) *slog.Logger {
-	fs.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slogLevelTrace,
-	}))
-	return fs.log
 }
 
 // Start of clean slate FAT32 filesystem image with name `keylargo`, 8GB in size.

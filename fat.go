@@ -424,7 +424,7 @@ outerLoop:
 				if csect+cc > uint32(fs.csize) {
 					cc = uint32(fs.csize) - csect // clip at cluster boundary.
 				}
-				if fs.disk_write(wbuff, sect, int(cc)) != drOK {
+				if fs.disk_write(wbuff[:cc*uint32(fs.ssize)], sect, int(cc)) != drOK {
 					return bw, fp.abort(frDiskErr)
 				}
 				off := fp.sect - sect
@@ -506,8 +506,8 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	} else if fsys.perm == 0 {
 		return frDenied
 	}
-
 	var dj dir
+	fp.obj.fs = fsys
 	dj.obj.fs = fsys
 	res := dj.follow_path(name)
 	if res == frOK {
