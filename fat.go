@@ -2352,19 +2352,17 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 	}
 }
 
+func bstr(s []byte) []byte {
+	i := 0
+	for i < len(s) && s[i] != 0 {
+		i++
+	}
+	return s[:i]
+}
+
 func str(s []byte) string {
-	if len(s) == 0 {
-		return ""
-	}
 	var buf []byte
-	for i := 0; i < len(s); i++ {
-		b := s[i]
-		if b == 0 || b >= 0x80 {
-			return string(buf)
-		}
-		buf = append(buf, byte(b))
-	}
-	return string(buf)
+	return string(append(buf, bstr(s)...))
 }
 
 func str16(s []uint16) string {

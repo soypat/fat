@@ -385,3 +385,11 @@ var fatInit = map[int64][512]byte{
 
 const rootFileContents = "this is\nthe root file\n"
 const dirFileContents = "this is not\nnot the root\nnot the root file\nnope. \nThis file has 5 lines.\n"
+
+func TestBootSector(t *testing.T) {
+	var bs bootsector
+	dat := fatInit[0]
+	bs.data = dat[:]
+
+	t.Log(bs.String())
+}
