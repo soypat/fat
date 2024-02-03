@@ -53,9 +53,15 @@ func (mbr *BootSector) UniqueDiskID() uint32 {
 	return binary.LittleEndian.Uint32(mbr.data[uniqueDiskIDOff : uniqueDiskIDOff+uniqueDiskIDLen])
 }
 
-// BootSignature returns the boot signature of the MBR. This is a magic number that indicates that this is a valid MBR.
+// BootSignature returns the boot signature of the MBR. This is a magic number (0xAA55) that indicates that this is a valid MBR.
 func (mbr *BootSector) BootSignature() uint16 {
 	return binary.LittleEndian.Uint16(mbr.data[bootSignatureOff : bootSignatureOff+2])
+}
+
+// IsProtectiveMBR returns true if the first partition of the MBR is a GPT protective MBR.
+// In this case the MBR is not used for booting and the GUID Partition Table can be found in the next LBA.
+func (mbr *BootSector) IsGPTProtective() bool {
+	return PartitionType(mbr.data[pteOffset+4]) == PartitionTypeGPTProtective
 }
 
 // PartitionTable returns the idx'th partition table entry of the MBR.
@@ -121,7 +127,7 @@ func (pte *PartitionTableEntry) NumberOfLBA() uint32 {
 
 // IsBootable returns true if the partition the PTE refers to is bootable.
 func (attrs DriveAttributes) IsBootable() bool {
-	return DriveAttrsBootable&0x80 != 0
+	return DriveAttrsBootable&attrs != 0
 }
 
 // CHS is a cylinder-head-sector address. This addressing scheme is deprecated by modern operating systems
@@ -151,6 +157,8 @@ const (
 	PartitionTypeLinux    PartitionType = 0x83
 	PartitionTypeFreeBSD  PartitionType = 0xA5
 	PartitionTypeAppleHFS PartitionType = 0xAF
+
+	PartitionTypeGPTProtective PartitionType = 0xEE
 )
 
 // DriveAttributes refers to the first byte of a Partition Table Entry. It specifies
@@ -158,5 +166,5 @@ const (
 type DriveAttributes byte
 
 const (
-	DriveAttrsBootable DriveAttributes = 0x80
+	DriveAttrsBootable DriveAttributes = 1 << 7
 )

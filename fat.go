@@ -1691,7 +1691,7 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 		if isTermLFN(wc) || isSep(wc) {
 			break // Break on end of path or a separator.
 		}
-		if strings.IndexByte("*:<>|\"?\x7f", byte(wc)) >= 0 {
+		if strings.IndexByte(forbiddenChars, byte(wc)) >= 0 {
 			return "", frInvalidName
 		}
 		if di >= lfnBufSize {
@@ -2352,6 +2352,14 @@ func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {
 	}
 }
 
+func clipname(s []byte) []byte {
+	i := 0
+	for i < len(s) && isfatchar(s[i]) {
+		i++
+	}
+	return s[:i]
+}
+
 func bstr(s []byte) []byte {
 	i := 0
 	for i < len(s) && s[i] != 0 {
@@ -2380,4 +2388,8 @@ func str16(s []uint16) string {
 		buf = append(buf, byte(b))
 	}
 	return string(buf)
+}
+
+func isfatchar(c byte) bool {
+	return c != ' ' && c != 0 && c < 0x7F
 }

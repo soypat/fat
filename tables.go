@@ -9,6 +9,9 @@ import (
 
 const (
 	badFilesystemType = "fat: bad filesystem type"
+
+	// Characters forbidden from being present in a file name on FAT filesystems.
+	forbiddenChars = ":+,/\\|;=\"<>[]*?\x7f"
 )
 
 const (
@@ -112,7 +115,7 @@ const (
 	bsNTres32      = 65 // FAT32: Error flag (BYTE)
 	bsBootSig32    = 66 // FAT32: Extended boot signature (BYTE)
 	bsVolID32      = 67 // FAT32: Volume serial number (DWORD)
-	bsVolLab32     = 71 // FAT32: Volume label string (8-byte)
+	bsVolLab32     = 71 // FAT32: Volume label string (11-byte)
 	bsFilSysType32 = 82 // FAT32: Filesystem type string (8-byte)
 	bsBootCode32   = 90 // FAT32: Boot code (420-byte)
 
