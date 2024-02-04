@@ -230,10 +230,8 @@ func (p *PartitionEntry) SetAttributes(attr PartitionAttributes) {
 func (p *PartitionEntry) ReadName(b []byte) (int, error) {
 	// Find the length of the name.
 	nameLen := 0
-	for ; nameLen < pteNameLen; nameLen++ {
-		if p.data[pteNameOff+nameLen] == 0 {
-			break
-		}
+	for nameLen < pteNameLen && p.data[pteNameOff+nameLen] != 0 {
+		nameLen++
 	}
 
 	n, err := utf16x.ToUTF8(b, p.data[pteNameOff:pteNameOff+nameLen], binary.LittleEndian)

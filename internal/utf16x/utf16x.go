@@ -43,7 +43,7 @@ func ToUTF8(dstUTF8, srcUTF16 []byte, order16 binary.ByteOrder) (int, error) {
 		r, size := DecodeRune(srcUTF16, order16)
 		if r == utf8.RuneError {
 			return n, errInvalidUTF16
-		} else if utf8.RuneLen(r) > len(dstUTF8) {
+		} else if utf8.RuneLen(r) > len(dstUTF8[n:]) {
 			return n, errShortDst
 		}
 		srcUTF16 = srcUTF16[size:]
@@ -55,13 +55,13 @@ func ToUTF8(dstUTF8, srcUTF16 []byte, order16 binary.ByteOrder) (int, error) {
 func FromUTF8(dst16, src8 []byte, order16 binary.ByteOrder) (int, error) {
 	n := 0
 	for len(src8) > 0 {
-		if len(dst16) < 2 {
+		if len(dst16[n:]) < 2 {
 			return n, errShortDst
 		}
 		r1, size := utf8.DecodeRune(src8)
 		if r1 == utf8.RuneError {
 			return n, errInvalidUTF8
-		} else if len(dst16) < 4 && utf16.IsSurrogate(r1) {
+		} else if len(dst16[n:]) < 4 && utf16.IsSurrogate(r1) {
 			return n, errShortDst
 		}
 		n += EncodeRune(dst16[n:], r1, order16)
