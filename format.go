@@ -91,22 +91,26 @@ func (f *Formatter) move_window(addr lba) error {
 	return nil
 }
 
-type bootsector struct {
+// biosParamBlock a.k.a BPB is the BIOS Parameter Block for FAT32 volumes.
+// It provides details on the filesystem type (FAT12, FAT16, FAT32),
+// sectors per cluster, total sectors, FAT size, and more, which are essential
+// for understanding the filesystem layout and capacity.
+type biosParamBlock struct {
 	data []byte
 }
 
 // SectorSize returns the size of a sector in bytes.
-func (bs *bootsector) SectorSize() uint16 {
+func (bs *biosParamBlock) SectorSize() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bpbBytsPerSec:])
 }
 
 // SetSectorSize sets the size of a sector in bytes.
-func (bs *bootsector) SetSectorSize(size uint16) {
+func (bs *biosParamBlock) SetSectorSize(size uint16) {
 	binary.LittleEndian.PutUint16(bs.data[bpbBytsPerSec:], size)
 }
 
 // SectorsPerFAT returns the number of sectors per File Allocation Table.
-func (bs *bootsector) SectorsPerFAT() uint32 {
+func (bs *biosParamBlock) SectorsPerFAT() uint32 {
 	fatsz := uint32(binary.LittleEndian.Uint16(bs.data[bpbFATSz16:]))
 	if fatsz == 0 {
 		fatsz = binary.LittleEndian.Uint32(bs.data[bpbFATSz32:])
@@ -115,29 +119,29 @@ func (bs *bootsector) SectorsPerFAT() uint32 {
 }
 
 // SetSectorsPerFAT sets the number of sectors per File Allocation Table.
-func (bs *bootsector) SetSectorsPerFAT(fatsz uint32) {
+func (bs *biosParamBlock) SetSectorsPerFAT(fatsz uint32) {
 	binary.LittleEndian.PutUint16(bs.data[bpbFATSz16:], 0)
 	binary.LittleEndian.PutUint32(bs.data[bpbFATSz32:], fatsz)
 }
 
 // NumberOfFATs returns the number of File Allocation Tables. Should be 1 or 2.
-func (bs *bootsector) NumberOfFATs() uint8 {
+func (bs *biosParamBlock) NumberOfFATs() uint8 {
 	return bs.data[bpbNumFATs]
 }
 
 // SetNumberOfFATs sets the number of FATs.
-func (bs *bootsector) SetNumberOfFATs(nfats uint8) {
+func (bs *biosParamBlock) SetNumberOfFATs(nfats uint8) {
 	bs.data[bpbNumFATs] = nfats
 }
 
 // SectorsPerCluster returns the number of sectors per cluster.
 // Should be a power of 2 and not larger than 128.
-func (bs *bootsector) SectorsPerCluster() uint16 {
+func (bs *biosParamBlock) SectorsPerCluster() uint16 {
 	return uint16(bs.data[bpbSecPerClus])
 }
 
 // SetSectorsPerCluster sets the number of sectors per cluster. Should be power of 2.
-func (bs *bootsector) SetSectorsPerCluster(spclus uint16) {
+func (bs *biosParamBlock) SetSectorsPerCluster(spclus uint16) {
 	bs.data[bpbSecPerClus] = byte(spclus)
 }
 
@@ -146,18 +150,18 @@ func (bs *bootsector) SetSectorsPerCluster(spclus uint16) {
 // redundant sectors with these first two. The number of reserved sectors is usually
 // 32 for FAT32 systems (~16k for 512 byte sectors).
 // Sectors 6 and 7 are usually the backup boot sector and the FS information sector, respectively.
-func (bs *bootsector) ReservedSectors() uint16 {
+func (bs *biosParamBlock) ReservedSectors() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bpbRsvdSecCnt:])
 }
 
 // SetReservedSectors sets the number of reserved sectors at the beginning of the volume.
-func (bs *bootsector) SetReservedSectors(rsvd uint16) {
+func (bs *biosParamBlock) SetReservedSectors(rsvd uint16) {
 	binary.LittleEndian.PutUint16(bs.data[bpbRsvdSecCnt:], rsvd)
 }
 
 // TotalSectors returns the total number of sectors in the volume that
 // can be used by the filesystem.
-func (bs *bootsector) TotalSectors() uint32 {
+func (bs *biosParamBlock) TotalSectors() uint32 {
 	totsec := uint32(binary.LittleEndian.Uint16(bs.data[bpbTotSec16:]))
 	if totsec == 0 {
 		totsec = binary.LittleEndian.Uint32(bs.data[bpbTotSec32:])
@@ -167,70 +171,70 @@ func (bs *bootsector) TotalSectors() uint32 {
 
 // SetTotalSectors sets the total number of sectors in the volume that
 // can be used by the filesystem.
-func (bs *bootsector) SetTotalSectors(totsec uint32) {
+func (bs *biosParamBlock) SetTotalSectors(totsec uint32) {
 	binary.LittleEndian.PutUint16(bs.data[bpbTotSec16:], 0)
 	binary.LittleEndian.PutUint32(bs.data[bpbTotSec32:], totsec)
 }
 
 // RootDirEntries returns the number of sectors occupied by the root directory.
 // Should be divisible by SectorSize/32.
-func (bs *bootsector) RootDirEntries() uint16 {
+func (bs *biosParamBlock) RootDirEntries() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bpbRootEntCnt:])
 }
 
 // SetRootDirEntries sets the number of sectors occupied by the root directory.
-func (bs *bootsector) SetRootDirEntries(entries uint16) {
+func (bs *biosParamBlock) SetRootDirEntries(entries uint16) {
 	binary.LittleEndian.PutUint16(bs.data[bpbRootEntCnt:], entries)
 }
 
 // RootCluster returns the first cluster of the root directory.
-func (bs *bootsector) RootCluster() uint32 {
+func (bs *biosParamBlock) RootCluster() uint32 {
 	return binary.LittleEndian.Uint32(bs.data[bpbRootClus32:])
 }
 
 // SetRootCluster sets the first cluster of the root directory.
-func (bs *bootsector) SetRootCluster(cluster uint32) {
+func (bs *biosParamBlock) SetRootCluster(cluster uint32) {
 	binary.LittleEndian.PutUint32(bs.data[bpbRootClus32:], cluster)
 }
 
 // Version returns the filesystem version, should be 0.0 for FAT32.
-func (bs *bootsector) Version() (major, minor uint8) {
+func (bs *biosParamBlock) Version() (major, minor uint8) {
 	return bs.data[bpbFSVer32], bs.data[bpbFSVer32+1]
 }
 
-func (bs *bootsector) ExtendedBootSignature() uint8 {
+func (bs *biosParamBlock) ExtendedBootSignature() uint8 {
 	return bs.data[bsBootSig32]
 }
 
 // BootSignature returns the boot signature at offset 510 which should be 0xAA55.
-func (bs *bootsector) BootSignature() uint16 {
+func (bs *biosParamBlock) BootSignature() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bs55AA:])
 }
 
 // FSInfo returns the sector number of the FS Information Sector.
 // Expect =1 for FAT32.
-func (bs *bootsector) FSInfo() uint16 {
+func (bs *biosParamBlock) FSInfo() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bpbFSInfo32:])
 }
 
 // DriveNumber returns the drive number.
-func (bs *bootsector) DriveNumber() uint8 {
+func (bs *biosParamBlock) DriveNumber() uint8 {
 	return bs.data[bsDrvNum32]
 }
 
 // VolumeSerialNumber returns the volume serial number.
-func (bs *bootsector) VolumeSerialNumber() uint32 {
+func (bs *biosParamBlock) VolumeSerialNumber() uint32 {
 	return binary.LittleEndian.Uint32(bs.data[bsVolID32:])
 }
 
 // VolumeLabel returns the volume label string.
-func (bs *bootsector) VolumeLabel() [11]byte {
+func (bs *biosParamBlock) VolumeLabel() [11]byte {
 	var label [11]byte
 	copy(label[:], bs.data[bsVolLab32:])
 	return label
 }
 
-func (bs *bootsector) SetVolumeLabel(label string) {
+func (bs *biosParamBlock) SetVolumeLabel(label string) {
 	n := copy(bs.data[bsVolLab32:bsVolLab32+11], label)
 	for i := n; i < 11; i++ {
 		bs.data[bsVolLab32+i] = ' '
@@ -238,21 +242,21 @@ func (bs *bootsector) SetVolumeLabel(label string) {
 }
 
 // FilesystemType returns the filesystem type string, usually "FAT32   ".
-func (bs *bootsector) FilesystemType() [8]byte {
+func (bs *biosParamBlock) FilesystemType() [8]byte {
 	var label [8]byte
 	copy(label[:], bs.data[bsFilSysType32:])
 	return label
 }
 
 // JumpInstruction returns the x86 jump instruction at the beginning of the boot sector.
-func (bs *bootsector) JumpInstruction() [3]byte {
+func (bs *biosParamBlock) JumpInstruction() [3]byte {
 	var jmpboot [3]byte
 	copy(jmpboot[:], bs.data[0:])
 	return jmpboot
 }
 
 // OEMName returns the Original Equipment Manufacturer name at the start of the bootsector.
-func (bs *bootsector) OEMName() [8]byte {
+func (bs *biosParamBlock) OEMName() [8]byte {
 	var oemname [8]byte
 	copy(oemname[:], bs.data[bsOEMName:])
 	return oemname
@@ -260,18 +264,18 @@ func (bs *bootsector) OEMName() [8]byte {
 
 // SetOEMName sets the Original Equipment Manufacturer name at the start of the bootsector.
 // Will clip off any characters beyond the 8th.
-func (bs *bootsector) SetOEMName(name string) {
+func (bs *biosParamBlock) SetOEMName(name string) {
 	n := copy(bs.data[bsOEMName:bsOEMName+8], name)
 	for i := n; i < 8; i++ {
 		bs.data[bsOEMName+i] = ' '
 	}
 }
 
-func (bs *bootsector) VolumeOffset() uint32 {
+func (bs *biosParamBlock) VolumeOffset() uint32 {
 	return binary.LittleEndian.Uint32(bs.data[bpbHiddSec:])
 }
 
-func (bs *bootsector) String() string {
+func (bs *biosParamBlock) String() string {
 	return string(bs.Appendf(nil, '\n'))
 }
 
@@ -298,7 +302,7 @@ func labelAppendUint32(label string, dst []byte, data uint32, sep byte) []byte {
 	return labelAppendUint(label, dst, uint64(data), sep)
 }
 
-func (bs *bootsector) Appendf(dst []byte, separator byte) []byte {
+func (bs *biosParamBlock) Appendf(dst []byte, separator byte) []byte {
 	appendData := func(name string, data []byte, sep byte) {
 		dst = labelAppend(dst, name, data, sep)
 	}
@@ -332,7 +336,7 @@ func (bs *bootsector) Appendf(dst []byte, separator byte) []byte {
 }
 
 // bootcode returns the boot code at the end of the boot sector.
-func (bs *bootsector) bootcode() []byte {
+func (bs *biosParamBlock) bootcode() []byte {
 	return bs.data[bsBootCode32:bs55AA]
 }
 
