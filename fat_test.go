@@ -329,6 +329,7 @@ var fatInit = map[int64][512]byte{
 		484: 0x72, 0x72, 0x41, 0x61, 0xfb, 0xf1, 0x1d, 0x00, 0x02,
 		510: 0x55, 0xaa},
 
+	// Below is the FAT.
 	32: {0xf8, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0x0f, 0xf8, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0x0f,
 		0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0x0f},
 	15368: {0xf8, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0x0f, 0xf8, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0x0f,
@@ -387,9 +388,23 @@ const rootFileContents = "this is\nthe root file\n"
 const dirFileContents = "this is not\nnot the root\nnot the root file\nnope. \nThis file has 5 lines.\n"
 
 func TestBootSector(t *testing.T) {
-	var bs bootsector
+	// Print out the boot sector data.
 	dat := fatInit[0]
-	bs.data = dat[:]
-
+	bs := bootsector{data: dat[:]}
+	fsiLBA := bs.FSInfo()
+	fatLBA := 0 + bs.ReservedSectors()
+	fatSz := bs.SectorsPerFAT() * uint32(bs.SectorSize())
 	t.Log(bs.String())
+
+	// Print out the FSInfo sector data.
+	datfsi := fatInit[int64(fsiLBA)]
+	fsi := fsinfoSector{data: datfsi[:]}
+	t.Log(fsi.String())
+
+	// Print out the FAT.
+	datFAT := fatInit[int64(fatLBA)]
+	fat := fat32Sector{data: datFAT[:]}
+	t.Log(fat.String())
+	_ = fatSz
+
 }

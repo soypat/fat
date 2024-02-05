@@ -224,10 +224,10 @@ func (p *PartitionEntry) SetAttributes(attr PartitionAttributes) {
 	binary.LittleEndian.PutUint64(p.data[48:56], uint64(attr))
 }
 
-// ReadName reads the partition name from the partition entry and
+// ReadNameAsUTF8 reads the partition name from the partition entry and
 // encodes it as utf-8 into the provided slice. The number of bytes
 // read is returned along with any error.
-func (p *PartitionEntry) ReadName(b []byte) (int, error) {
+func (p *PartitionEntry) ReadNameAsUTF8(b []byte) (int, error) {
 	// Find the length of the name.
 	nameLen := 0
 	for nameLen < pteNameLen && p.data[pteNameOff+nameLen] != 0 {
@@ -242,18 +242,21 @@ func (p *PartitionEntry) ReadName(b []byte) (int, error) {
 }
 
 func (p *PartitionEntry) ClearName() {
-	p.data[pteNameOff] = 0
+	p.clearNameAfter(0)
 }
 
-// WriteName writes a utf-8 encoded string as the Partition Entry's name.
-func (p *PartitionEntry) WriteName(name []byte) error {
+// SetNameUTF8 writes a utf-8 encoded string as the Partition Entry's name.
+func (p *PartitionEntry) SetNameUTF8(name []byte) error {
 	n, err := utf16x.FromUTF8(p.data[pteNameOff:pteNameOff+pteNameLen], name, binary.LittleEndian)
 	if err != nil {
 		return err
 	}
+	p.clearNameAfter(n)
+	return nil
+}
 
-	for i := n; i < pteNameLen; i++ {
+func (p *PartitionEntry) clearNameAfter(idx int) {
+	for i := idx; i < pteNameLen; i++ {
 		p.data[pteNameOff+i] = 0
 	}
-	return nil
 }

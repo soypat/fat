@@ -142,7 +142,10 @@ func (bs *bootsector) SetSectorsPerCluster(spclus uint16) {
 }
 
 // ReservedSectors returns the number of reserved sectors at the beginning of the volume.
-// Should be at least 1.
+// Should be at least 1. Reserved sectors include the boot sector, FS information sector and
+// redundant sectors with these first two. The number of reserved sectors is usually
+// 32 for FAT32 systems (~16k for 512 byte sectors).
+// Sectors 6 and 7 are usually the backup boot sector and the FS information sector, respectively.
 func (bs *bootsector) ReservedSectors() uint16 {
 	return binary.LittleEndian.Uint16(bs.data[bpbRsvdSecCnt:])
 }
@@ -272,21 +275,35 @@ func (bs *bootsector) String() string {
 	return string(bs.Appendf(nil, '\n'))
 }
 
+func labelAppend(dst []byte, label string, data []byte, sep byte) []byte {
+	if len(data) == 0 {
+		return dst
+	}
+	dst = append(dst, label...)
+	dst = append(dst, ':')
+	dst = append(dst, data...)
+	dst = append(dst, sep)
+	return dst
+}
+
+func labelAppendUint(label string, dst []byte, data uint64, sep byte) []byte {
+	dst = append(dst, label...)
+	dst = append(dst, ':')
+	dst = strconv.AppendUint(dst, data, 10)
+	dst = append(dst, sep)
+	return dst
+}
+
+func labelAppendUint32(label string, dst []byte, data uint32, sep byte) []byte {
+	return labelAppendUint(label, dst, uint64(data), sep)
+}
+
 func (bs *bootsector) Appendf(dst []byte, separator byte) []byte {
 	appendData := func(name string, data []byte, sep byte) {
-		if len(data) == 0 {
-			return
-		}
-		dst = append(dst, name...)
-		dst = append(dst, ':')
-		dst = append(dst, data...)
-		dst = append(dst, sep)
+		dst = labelAppend(dst, name, data, sep)
 	}
 	appendInt := func(name string, data uint32, sep byte) {
-		dst = append(dst, name...)
-		dst = append(dst, ':')
-		dst = strconv.AppendUint(dst, uint64(data), 10)
-		dst = append(dst, sep)
+		dst = labelAppendUint32(name, dst, data, sep)
 	}
 	oem := bs.OEMName()
 	appendData("OEM", clipname(oem[:]), separator)
@@ -314,7 +331,128 @@ func (bs *bootsector) Appendf(dst []byte, separator byte) []byte {
 	return dst
 }
 
-// BootCode returns the boot code at the end of the boot sector.
-func (bs *bootsector) BootCode() []byte {
+// bootcode returns the boot code at the end of the boot sector.
+func (bs *bootsector) bootcode() []byte {
 	return bs.data[bsBootCode32:bs55AA]
+}
+
+// fsinfoSector is the FS Information Sector for FAT32 volumes.
+type fsinfoSector struct {
+	data []byte
+}
+
+// Signatures returns the 3 signatures at the beginning, middle and end of the sector.
+// Expect them to be 0x41615252, 0x61417272, 0xAA550000 respectively.
+func (fsi *fsinfoSector) Signatures() (sigStart, sigMid, sigEnd uint32) {
+	return binary.LittleEndian.Uint32(fsi.data[0:]),
+		binary.LittleEndian.Uint32(fsi.data[0x1e4:]),
+		binary.LittleEndian.Uint32(fsi.data[0x1fc:])
+}
+
+// SetSignatures sets the 3 signatures at the beginning, middle and end of the sector.
+// Should be called as follows to set valid signatures expected by most implementations:
+//
+//	fsi.SetSignatures(0x41615252, 0x61417272, 0xAA550000)
+func (fsi *fsinfoSector) SetSignatures(sigStart, sigMid, sigEnd uint32) {
+	binary.LittleEndian.PutUint32(fsi.data[0:], sigStart)
+	binary.LittleEndian.PutUint32(fsi.data[0x1e4:], sigMid)
+	binary.LittleEndian.PutUint32(fsi.data[0x1fc:], sigEnd)
+}
+
+// FreeClusterCount is the last known number of free data clusters on the volume,
+// or 0xFFFFFFFF if unknown. Should be set to 0xFFFFFFFF during format and updated by
+// the operating system later on. Must not be absolutely relied upon to be correct in all scenarios.
+// Before using this value, the operating system should sanity check this value to
+// be less than or equal to the volume's count of clusters.
+func (fsi *fsinfoSector) FreeClusterCount() uint32 {
+	return binary.LittleEndian.Uint32(fsi.data[0x1e8:])
+}
+
+// SetFreeClusterCount sets the last known number of free data clusters on the volume.
+func (fsi *fsinfoSector) SetFreeClusterCount(count uint32) {
+	binary.LittleEndian.PutUint32(fsi.data[0x1e8:], count)
+}
+
+// LastAllocatedCluster is the number of the most recently known to be allocated data cluster.
+// Should be set to 0xFFFFFFFF during format and updated by the operating system later on.
+// With 0xFFFFFFFF the system should start at cluster 0x00000002. Must not be absolutely
+// relied upon to be correct in all scenarios. Before using this value, the operating system
+// should sanity check this value to be a valid cluster number on the volume.
+func (fsi *fsinfoSector) LastAllocatedCluster() uint32 {
+	return binary.LittleEndian.Uint32(fsi.data[0x1ec:])
+}
+
+// SetLastAllocatedCluster sets the number of the most recently known to be allocated data cluster.
+func (fsi *fsinfoSector) SetLastAllocatedCluster(cluster uint32) {
+	binary.LittleEndian.PutUint32(fsi.data[0x1ec:], cluster)
+}
+
+func (fsi *fsinfoSector) String() string {
+	return string(fsi.Appendf(nil, '\n'))
+}
+
+func (fsi *fsinfoSector) Appendf(dst []byte, separator byte) []byte {
+	lo, mid, hi := fsi.Signatures()
+	if lo != 0x41615252 || mid != 0x61417272 || hi != 0xAA550000 {
+		dst = append(dst, "invalid fsi signatures"...)
+		dst = append(dst, separator)
+	}
+	dst = labelAppendUint32("FreeClusterCount", dst, fsi.FreeClusterCount(), separator)
+	dst = labelAppendUint32("LastAllocatedCluster", dst, fsi.LastAllocatedCluster(), separator)
+	return dst
+}
+
+// fatSector is a File Allocation Table sector.
+type fat32Sector struct {
+	data []byte
+}
+
+type entry uint32
+
+func (fs *fat32Sector) Entry(idx int) entry {
+	return entry(binary.LittleEndian.Uint32(fs.data[idx*4:]))
+}
+
+func (fs *fat32Sector) SetEntry(idx int, ent entry) {
+	binary.LittleEndian.PutUint32(fs.data[idx*4:], uint32(ent))
+}
+
+func (fs entry) Cluster() uint32 {
+	return uint32(fs) & 0x0FFF_FFFF
+}
+
+func (e entry) Appendf(dst []byte, separator byte) []byte {
+	if e.IsEOF() {
+		dst = labelAppendUint32("entry", dst, e.Cluster(), ' ')
+		return append(dst, "EOF"...)
+	}
+	return labelAppendUint32("entry", dst, e.Cluster(), separator)
+}
+
+func (e entry) IsEOF() bool {
+	return e&0x0FFF_FFFF >= 0x0FFF_FFF8
+}
+
+func (fs *fat32Sector) String() string {
+	return string(fs.AppendfEntries(nil, " -> ", '\n'))
+}
+
+func (fs *fat32Sector) AppendfEntries(dst []byte, entrySep string, chainSep byte) []byte {
+	var inChain bool
+	for i := 0; i < len(fs.data)/4; i++ {
+		entry := fs.Entry(i)
+		if entry == 0 {
+			break
+		}
+		dst = entry.Appendf(dst, chainSep)
+		if entry.IsEOF() {
+			dst = append(dst, chainSep)
+			inChain = false
+		} else if inChain {
+			dst = append(dst, entrySep...)
+		} else {
+			inChain = true
+		}
+	}
+	return dst
 }
