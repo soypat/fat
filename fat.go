@@ -108,12 +108,11 @@ const (
 )
 
 type FileInfo struct {
-	fsize   int64 // File Size.
-	fdate   uint16
-	ftime   uint16
-	fattrib byte
-	altname [sfnBufSize + 1]byte
-	fname   [lfnBufSize + 1]byte
+	fsize    int64 // File Size.
+	datetime datetime
+	fattrib  byte
+	altname  [sfnBufSize + 1]byte
+	fname    [lfnBufSize + 1]byte
 }
 
 type mkfsParam struct {
@@ -1447,7 +1446,7 @@ func (dp *dir) alloc(nent int) (fr fileResult) {
 		}
 		isEx := fsys.fstype == fstypeExFAT
 		dname := dp.dir[dirNameOff]
-		if (isEx && dp.dir[xdirType]&0x80 == 0) || (!isEx && (dname == mskDDEM || dname == 0)) {
+		if (!isEx && (dname == mskDDEM || dname == 0)) || (isEx && dp.dir[xdirType]&0x80 == 0) {
 			// Entry is free.
 			n++
 			if n == nent {
@@ -1975,8 +1974,8 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 	}
 	fno.fattrib = dp.dir[dirAttrOff] & amMASK
 	fno.fsize = int64(binary.LittleEndian.Uint32(dp.dir[dirFileSizeOff:]))
-	fno.ftime = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff:])
-	fno.fdate = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff+2:])
+	fno.datetime.time = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff:])
+	fno.datetime.date = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff+2:])
 }
 
 func put_utf8(r rune, buf []byte) int {

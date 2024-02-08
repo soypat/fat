@@ -182,14 +182,7 @@ func (finfo *FileInfo) Size() int64 {
 
 // ModTime returns the modification time of the file.
 func (finfo *FileInfo) ModTime() time.Time {
-	// https://www.win.tue.nl/~aeb/linux/fs/fat/fat-1.html
-	hour := int(finfo.ftime >> 11)
-	min := int((finfo.ftime >> 5) & 0x3f)
-	doubleSeconds := int(finfo.ftime & 0x1f)
-	yearSince1980 := int(finfo.fdate >> 9)
-	month := int((finfo.fdate >> 5) & 0xf)
-	day := int(finfo.fdate & 0x1f)
-	return time.Date(yearSince1980+1980, time.Month(month), day, hour, min, 2*doubleSeconds, 0, time.UTC)
+	return finfo.datetime.Time()
 }
 
 // IsDir returns true if the file is a directory.
