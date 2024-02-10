@@ -33,7 +33,7 @@ type dirSector struct {
 type datetime struct {
 	time uint16
 	date uint16
-	fine byte
+	fine uint8
 }
 
 func newDatetime(t time.Time) datetime {
@@ -41,7 +41,7 @@ func newDatetime(t time.Time) datetime {
 	return datetime{
 		time: uint16(hour<<11 | min<<5 | sec/2),
 		date: uint16(t.Year()-1980)<<9 | uint16(t.Month())<<5 | uint16(t.Day()),
-		fine: byte(t.Nanosecond()/10e6) + 100*byte(sec%2),
+		fine: uint8(t.Nanosecond()/10e6) + 100*uint8(sec%2),
 	}
 }
 
@@ -568,3 +568,47 @@ func (lfnt *longFilenameEntry) ReadData(b []byte) {
 	copy(b[10:], lfnt.data[14:14+12])
 	copy(b[22:], lfnt.data[28:28+4])
 }
+
+type windowHandler struct {
+	sect      int64
+	fatsize   int64
+	fatbase   int64
+	bd        BlockDevice
+	modified  bool
+	reduntant bool
+	win       [512]byte
+}
+
+func (wh *windowHandler) move(sector int64) (fr fileResult) {
+	if sector == wh.sect {
+		return frOK // Do nothing if window offset not changed.
+	}
+	fr = wh.sync() // Flush window.
+	if fr != frOK {
+		return fr
+	}
+	_, err := wh.bd.ReadBlocks(wh.win[:], sector)
+	if err != nil {
+		sector = -1 // Invalidate window offset if disk error occured.
+		fr = frDiskErr
+	}
+	wh.sect = sector
+	return fr
+}
+
+func (wh *windowHandler) sync() (fr fileResult) {
+	if wh.modified {
+		return frOK // Diska access window not dirty.
+	}
+	_, err := wh.bd.WriteBlocks(wh.win[:], wh.sect)
+	if err != nil {
+		return frDiskErr
+	}
+	if wh.reduntant && wh.sect-wh.fatbase < wh.fatsize {
+		wh.bd.WriteBlocks(wh.win[:], wh.sect+wh.fatsize)
+	}
+	wh.modified = false
+	return frOK
+}
+
+func (wh *windowHandler) flagAsModified() { wh.modified = true }

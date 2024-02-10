@@ -43,7 +43,8 @@ const (
 	maxu16              = 0xffff
 	maxu32       uint32 = 0xffff_ffff
 	negative1_32        = 0xffff_ffff
-	badLBA       lba    = negative1_32
+	badLBA              = negative1_32
+	badCluster          = negative1_32
 	mask28bits   uint32 = 0x0FFF_FFFF
 
 	offsetMBRTable = 446  // Offset of partition table in the MBR.

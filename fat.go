@@ -238,7 +238,7 @@ func (fp *File) f_read(buff []byte) (br int, res fileResult) {
 				}
 				if clst < 2 {
 					return br, fp.abort(frIntErr)
-				} else if clst == maxu32 {
+				} else if clst == badCluster {
 					return br, fp.abort(frDiskErr)
 				}
 				fp.clust = clst
@@ -397,7 +397,7 @@ outerLoop:
 					break outerLoop
 				case 1:
 					return bw, fp.abort(frIntErr)
-				case maxu32:
+				case badCluster:
 					return bw, fp.abort(frDiskErr)
 				}
 				fp.clust = clst // Update current cluster.
@@ -599,7 +599,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 			clst = fp.obj.clusterstat(clst)
 			if clst <= 1 {
 				res = frIntErr
-			} else if clst == maxu32 {
+			} else if clst == badCluster {
 				res = frDiskErr
 			}
 		}
@@ -693,7 +693,7 @@ func (dp *dir) read(vol bool) (fr fileResult) {
 				}
 			} else {
 				if ord != 0 || sum != sum_sfn(dp.dir) {
-					dp.blk_ofs = maxu32 // No LFN.
+					dp.blk_ofs = badLBA // No LFN.
 				}
 				break
 			}
@@ -1542,7 +1542,7 @@ func (dp *dir) find() fileResult {
 		return frUnsupported // TODO(soypat): implement exFAT.
 	}
 	var ord, sum byte = 0xff, 0xff
-	dp.blk_ofs = 0xffff_ffff // Reset LFN sequence.
+	dp.blk_ofs = badLBA // Reset LFN sequence.
 	for fr == frOK {
 		fr = fsys.move_window(dp.sect)
 		if fr != frOK {
@@ -1559,7 +1559,7 @@ func (dp *dir) find() fileResult {
 		dp.obj.attr = attr
 		if c == mskDDEM || (attr&amVOL != 0 && attr != amLFN) {
 			ord = 0xff
-			dp.blk_ofs = 0xffff_ffff // Reset LFN sequence.
+			dp.blk_ofs = badLBA // Reset LFN sequence.
 		} else {
 			if attr == amLFN {
 				if dp.fn[nsFLAG]&nsNOLFN == 0 {
@@ -1584,7 +1584,7 @@ func (dp *dir) find() fileResult {
 				}
 				// Reset LFN sequence.
 				ord = 0xff
-				dp.blk_ofs = 0xffff_ffff
+				dp.blk_ofs = badLBA
 			}
 		}
 		const stretchTable = false
@@ -1633,7 +1633,7 @@ func (dp *dir) next(stretch bool) fileResult {
 		clst := dp.obj.clusterstat(dp.clust)
 		if clst <= 1 {
 			return frIntErr
-		} else if clst == 0xffff_ffff {
+		} else if clst == badCluster {
 			return frDiskErr
 		} else if clst >= fsys.n_fatent {
 			if !stretch {
@@ -1648,7 +1648,7 @@ func (dp *dir) next(stretch bool) fileResult {
 				return frDenied
 			case 1:
 				return frIntErr
-			case maxu32:
+			case badCluster:
 				return frDiskErr
 			}
 			// Try cleaning the stretched table.
@@ -1855,7 +1855,7 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 		csz := uint32(fsys.csize) * uint32(fsys.ssize)
 		for ofs >= csz {
 			clst = dp.obj.clusterstat(clst)
-			if clst == 0xffff_ffff {
+			if clst == badCluster {
 				return frDiskErr
 			} else if clst < 2 || clst >= fsys.n_fatent {
 				return frIntErr
@@ -1886,7 +1886,7 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 	// TODO(soypat): implement exFAT here.
 	var si, di int
 	var wc uint16
-	if dp.blk_ofs != maxu32 {
+	if dp.blk_ofs != badLBA {
 		// Get LFN if available.
 		var hs uint16
 		for fsys.lfnbuf[si] != 0 {
@@ -2006,7 +2006,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 		if cs < 2 {
 			fsys.logerror("create_chain:insanity")
 			return 1
-		} else if cs == maxu32 || cs < fsys.n_fatent {
+		} else if cs == badCluster || cs < fsys.n_fatent {
 			// Disk error or it is already followed by next cluster.
 			return cs
 		}
@@ -2024,7 +2024,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 			ncl = 2
 		}
 		cs = obj.clusterstat(ncl)
-		if cs == 1 || cs == maxu32 {
+		if cs == 1 || cs == badCluster {
 			return cs // Return error as is.
 		}
 		if cs != 0 {
@@ -2050,7 +2050,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 			cs = obj.clusterstat(ncl)
 			if cs == 0 {
 				break
-			} else if cs == 1 || cs == maxu32 {
+			} else if cs == 1 || cs == badCluster {
 				return cs // Return error as is.
 			} else if ncl == scl {
 				return 0 // No free cluster.
@@ -2058,7 +2058,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 		}
 	}
 	// Make new cluster EOC.
-	fr := fsys.put_clusterstat(ncl, maxu32)
+	fr := fsys.put_clusterstat(ncl, badCluster)
 	if fr == frOK && clst != 0 {
 		// Link cluster to previous one if needed.
 		fr = fsys.put_clusterstat(clst, ncl)
@@ -2071,7 +2071,7 @@ func (obj *objid) create_chain(clst uint32) uint32 {
 		fsys.fsi_flag |= 1
 	} else {
 		if fr == frDiskErr {
-			ncl = maxu32
+			ncl = badCluster
 		} else {
 			ncl = 1
 		}
@@ -2092,7 +2092,7 @@ func (obj *objid) remove_chain(clst, pclst uint32) (res fileResult) {
 
 	if pclst != 0 && (fsys.fstype != fstypeExFAT || obj.stat != 2) {
 		// Mark previous cluster EOC on the FAT if exists.
-		res = fsys.put_clusterstat(pclst, maxu32)
+		res = fsys.put_clusterstat(pclst, badCluster)
 		if res != frOK {
 			return res
 		}
@@ -2109,7 +2109,7 @@ removeloop:
 			break removeloop
 		case 1:
 			return frIntErr
-		case maxu32:
+		case badCluster:
 			return frDiskErr
 		}
 		if fsys.fstype != fstypeExFAT {
