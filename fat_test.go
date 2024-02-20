@@ -3,7 +3,6 @@ package fat
 import (
 	"bytes"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -168,7 +167,11 @@ func TestFileInfo(t *testing.T) {
 	}
 }
 
-func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
+func DefaultFATByteBlocks(numBlocks int) BlockDeviceExtended {
+	// TODO: try BlockMap implementation with tests to see perf improvements?
+	// newfat := maps.Clone(fatInit)
+	// blk := &BlockMap{data: newfat}
+	// return blk
 	const defaultBlockSize = 512
 	blk, _ := makeBlockIndexer(defaultBlockSize)
 	buf := make([]byte, defaultBlockSize*numBlocks)
@@ -179,7 +182,7 @@ func DefaultFATByteBlocks(numBlocks int) *BytesBlocks {
 		}
 		copy(buf[off:], b[:])
 	}
-	return &BytesBlocks{
+	return &BlockByteSlice{
 		blk: blk,
 		buf: buf,
 	}
@@ -189,65 +192,6 @@ func mustBeOK(t *testing.T, fr fileResult) {
 	if fr != frOK {
 		t.Fatalf("FR%d: %s", fr, fr.Error())
 	}
-}
-
-type BytesBlocks struct {
-	blk blkIdxer
-	buf []byte
-}
-
-func (b *BytesBlocks) BlockSize() int { return int(b.blk.size()) }
-
-func (b *BytesBlocks) ReadBlocks(dst []byte, startBlock int64) (int, error) {
-	if b.blk.off(int64(len(dst))) != 0 {
-		return 0, errors.New("startBlock not aligned to block size")
-	} else if startBlock < 0 {
-		return 0, errors.New("invalid startBlock")
-	}
-	off := startBlock * b.blk.size()
-	end := off + int64(len(dst))
-	if end > int64(len(b.buf)) {
-		return 0, fmt.Errorf("read past end of buffer: %d > %d", end, len(b.buf))
-		// return 0, errors.New("read past end of buffer")
-	}
-
-	return copy(dst, b.buf[off:end]), nil
-}
-func (b *BytesBlocks) WriteBlocks(data []byte, startBlock int64) (int, error) {
-	if b.blk.off(int64(len(data))) != 0 {
-		return 0, errors.New("startBlock not aligned to block size")
-	} else if startBlock < 0 {
-		return 0, errors.New("invalid startBlock")
-	}
-	off := startBlock * b.blk.size()
-	end := off + int64(len(data))
-	if end > int64(len(b.buf)) {
-		return 0, fmt.Errorf("write past end of buffer: %d > %d", end, len(b.buf))
-		// return 0, errors.New("write past end of buffer")
-	}
-
-	return copy(b.buf[off:end], data), nil
-}
-func (b *BytesBlocks) EraseBlocks(startBlock, numBlocks int64) error {
-	if startBlock < 0 || numBlocks <= 0 {
-		return errors.New("invalid erase parameters")
-	}
-	start := startBlock * b.blk.size()
-	end := start + numBlocks*b.blk.size()
-	if end > int64(len(b.buf)) {
-		return errors.New("erase past end of buffer")
-	}
-	clear(b.buf[start:end])
-	return nil
-}
-
-func (b *BytesBlocks) Size() int64 {
-	return int64(len(b.buf))
-}
-
-// Mode returns 0 for no connection/prohibited access, 1 for read-only, 3 for read-write.
-func (b *BytesBlocks) Mode() uint8 {
-	return 3
 }
 
 func fatInitDiff(data []byte) (s string) {
@@ -264,17 +208,18 @@ func fatInitDiff(data []byte) (s string) {
 	}
 	return s
 }
-func initTestFAT() (*FS, *BytesBlocks) {
+
+func initTestFAT() (*FS, BlockDeviceExtended) {
 	return initTestFATWithLogger(32000, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slogLevelTrace,
 	})))
 
 }
-func initTestFATWithLogger(size int64, log *slog.Logger) (*FS, *BytesBlocks) {
+func initTestFATWithLogger(size int64, log *slog.Logger) (*FS, BlockDeviceExtended) {
 	dev := DefaultFATByteBlocks(int(size))
 	var fs FS
 	fs.log = log
-	ss := uint16(dev.blk.size())
+	ss := uint16(dev.BlockSize())
 	err := fs.Mount(dev, int(ss), ModeRW)
 	if err != nil {
 		panic(err)
