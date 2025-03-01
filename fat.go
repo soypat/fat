@@ -1945,6 +1945,9 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 		}
 		di += nw
 	}
+	// terminate altname
+	fno.altname[di] = 0
+
 	if fno.fname[0] == 0 {
 		// LFN is invalid: altname needs to be copied to fname.
 		if di == 0 {
