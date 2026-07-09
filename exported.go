@@ -110,6 +110,15 @@ func (fp *File) Close() error {
 	return nil
 }
 
+// Sync commits all pending writes of the filesystem to the underlying device.
+func (fsys *FS) Sync() error {
+	fr := fsys.sync()
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
 // Sync commits the current contents of the file to the filesystem immediately.
 func (fp *File) Sync() error {
 	fr := fp.obj.validate()
