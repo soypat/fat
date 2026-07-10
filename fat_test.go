@@ -192,6 +192,7 @@ func DefaultFATByteBlocks(numBlocks int) BlockDeviceExtended {
 		buf: buf,
 	}
 }
+
 // lfnEnabled reports whether this build has long file name support
 // (false when built with the fat_nolfn tag, which makes lfnbuffer empty).
 var lfnEnabled = len(lfnbuffer{}) != 0
