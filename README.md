@@ -67,6 +67,23 @@ func main() {
     // Output: Hello, World!
 }
 ```
+## Disabling long file name support
+
+Building with the `fat_nolfn` build tag disables long file name (LFN) support,
+the equivalent of a FatFs build with `FF_USE_LFN=0`:
+
+```sh
+go build -tags fat_nolfn .
+```
+
+Only 8.3 short names work in this mode: names longer than 8.3 or otherwise not
+representable as a short name return an invalid name error, and directory
+listings report the stored short name (uppercase). In exchange the build drops
+the LFN machinery — the embedded OEM code page table, UTF-8/UTF-16 name
+conversion and the LFN directory entry handling — measured on a TinyGo
+`pico` build as ~4.4kB less flash and ~4.8kB less RAM (code page table no
+longer copied to RAM, plus the 512 byte LFN working buffer in `fat.FS`).
+
 ## Testing
 
 The test suite includes golden torture tests (`golden_torture_test.go`) that
