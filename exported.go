@@ -27,6 +27,8 @@ const (
 var (
 	errInvalidMode   = errors.New("invalid fat access mode")
 	errForbiddenMode = errors.New("forbidden fat access mode")
+	errWhence        = errors.New("fat: invalid whence")
+	errNegativeSeek  = errors.New("fat: negative seek position")
 )
 
 // Dir represents an open FAT directory.
@@ -96,6 +98,37 @@ func (fp *File) Write(buf []byte) (int, error) {
 	return bw, nil
 }
 
+// Seek sets the offset for the next Read or Write on the file to offset,
+// interpreted according to whence: [io.SeekStart], [io.SeekCurrent] or
+// [io.SeekEnd]. It returns the new offset and implements the [io.Seeker]
+// interface. Seeking past the end of a file open for writing extends the
+// file; the contents of the gap are undefined.
+func (fp *File) Seek(offset int64, whence int) (int64, error) {
+	fr := fp.obj.validate()
+	if fr != frOK {
+		return 0, fr
+	}
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = fp.fptr + offset
+	case io.SeekEnd:
+		abs = fp.obj.objsize + offset
+	default:
+		return 0, errWhence
+	}
+	if abs < 0 {
+		return 0, errNegativeSeek
+	}
+	fr = fp.f_lseek(abs)
+	if fr != frOK {
+		return 0, fr
+	}
+	return fp.fptr, nil
+}
+
 // Close closes the file and syncs any unwritten data to the underlying device.
 func (fp *File) Close() error {
 	fr := fp.obj.validate()
@@ -104,6 +137,15 @@ func (fp *File) Close() error {
 	}
 
 	fr = fp.f_close()
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
+// Remove removes the named file or empty directory from the filesystem.
+func (fsys *FS) Remove(path string) error {
+	fr := fsys.f_unlink(path)
 	if fr != frOK {
 		return fr
 	}
@@ -120,13 +162,14 @@ func (fsys *FS) Sync() error {
 }
 
 // Sync commits the current contents of the file to the filesystem immediately.
+// It flushes the file's cached data and its directory entry to the device.
 func (fp *File) Sync() error {
 	fr := fp.obj.validate()
 	if fr != frOK {
 		return fr
 	}
 
-	fr = fp.obj.fs.sync()
+	fr = fp.obj.fs.f_sync(fp)
 	if fr != frOK {
 		return fr
 	}
