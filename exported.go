@@ -43,6 +43,8 @@ type Dir struct {
 // It immediately invalidates previously open files and directories pointing to the same FS.
 // Mode should be ModeRead, ModeWrite, or both.
 func (fsys *FS) Mount(bd BlockDevice, blockSize int, mode Mode) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	if mode&^(ModeRead|ModeWrite) != 0 {
 		return errInvalidMode
 	} else if blockSize > math.MaxUint16 {
@@ -59,6 +61,8 @@ func (fsys *FS) Mount(bd BlockDevice, blockSize int, mode Mode) error {
 // The path must be absolute (starting with a slash) and must not contain
 // any elements that are "." or "..".
 func (fsys *FS) OpenFile(fp *File, path string, mode Mode) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	prohibited := (mode & ModeRW) &^ fsys.perm
 	if mode&^allowedModes != 0 {
 		return errInvalidMode
@@ -72,12 +76,45 @@ func (fsys *FS) OpenFile(fp *File, path string, mode Mode) error {
 	return nil
 }
 
+// lock acquires the file's filesystem lock, guarding against a concurrent
+// Close: the handle is validated once the lock is held since Close
+// invalidates it (by id, never by clearing obj.fs) under the same lock,
+// making the unsynchronized read of obj.fs safe. On success the FS is
+// returned locked and the caller must Unlock it.
+func (fp *File) lock() (*FS, fileResult) {
+	fsys := fp.obj.fs
+	if fsys == nil {
+		return nil, frInvalidObject
+	}
+	fsys.mu.Lock()
+	if fr := fp.obj.validate(); fr != frOK {
+		fsys.mu.Unlock()
+		return nil, fr
+	}
+	return fsys, frOK
+}
+
+// lock is the Dir counterpart of (*File).lock.
+func (dp *Dir) lock() (*FS, fileResult) {
+	fsys := dp.obj.fs
+	if fsys == nil {
+		return nil, frInvalidObject
+	}
+	fsys.mu.Lock()
+	if fr := dp.obj.validate(); fr != frOK {
+		fsys.mu.Unlock()
+		return nil, fr
+	}
+	return fsys, frOK
+}
+
 // Read reads up to len(buf) bytes from the File. It implements the [io.Reader] interface.
 func (fp *File) Read(buf []byte) (int, error) {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
 	}
+	defer fsys.mu.Unlock()
 	br, fr := fp.f_read(buf)
 	if fr != frOK {
 		return br, fr
@@ -89,10 +126,11 @@ func (fp *File) Read(buf []byte) (int, error) {
 
 // Write writes len(buf) bytes to the File. It implements the [io.Writer] interface.
 func (fp *File) Write(buf []byte) (int, error) {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
 	}
+	defer fsys.mu.Unlock()
 	bw, fr := fp.f_write(buf)
 	if fr != frOK {
 		return bw, fr
@@ -115,10 +153,12 @@ func (fp *File) WriteString(s string) (int, error) {
 // When fewer than len(p) bytes are read it returns a non-nil error (io.EOF at
 // end of file).
 func (fp *File) ReadAt(p []byte, off int64) (int, error) {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
-	} else if off < 0 {
+	}
+	defer fsys.mu.Unlock()
+	if off < 0 {
 		return 0, errNegativeOffset
 	} else if off >= fp.obj.objsize {
 		// Checked before seeking since f_lseek past EOF in write mode
@@ -147,10 +187,12 @@ func (fp *File) ReadAt(p []byte, off int64) (int, error) {
 // Seek is saved and restored, so WriteAt does not affect it. Writing past the
 // end of the file extends it; the contents of any gap are undefined.
 func (fp *File) WriteAt(p []byte, off int64) (int, error) {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
-	} else if off < 0 {
+	}
+	defer fsys.mu.Unlock()
+	if off < 0 {
 		return 0, errNegativeOffset
 	} else if fp.flag&faWrite == 0 {
 		return 0, frWriteProtected
@@ -175,6 +217,12 @@ func (fp *File) WriteAt(p []byte, off int64) (int, error) {
 // Size returns the current size of the file in bytes, including data
 // written but not yet synced to the device.
 func (fp *File) Size() int64 {
+	fsys := fp.obj.fs
+	if fsys == nil {
+		return fp.obj.objsize
+	}
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	return fp.obj.objsize
 }
 
@@ -184,14 +232,16 @@ func (fp *File) Size() int64 {
 // offset is beyond the new size it is moved to the new end of file; otherwise
 // Truncate does not affect it.
 func (fp *File) Truncate(size int64) error {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return fr
-	} else if fp.err != frOK {
+	}
+	defer fsys.mu.Unlock()
+	if fp.err != frOK {
 		return fp.err
 	} else if size < 0 {
 		return errNegativeOffset
-	} else if fp.flag&faWrite == 0 || fp.obj.fs.perm&ModeWrite == 0 {
+	} else if fp.flag&faWrite == 0 || fsys.perm&ModeWrite == 0 {
 		return frWriteProtected
 	}
 	cur := fp.fptr
@@ -219,10 +269,11 @@ func (fp *File) Truncate(size int64) error {
 // interface. Seeking past the end of a file open for writing extends the
 // file; the contents of the gap are undefined.
 func (fp *File) Seek(offset int64, whence int) (int64, error) {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
 	}
+	defer fsys.mu.Unlock()
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -246,11 +297,11 @@ func (fp *File) Seek(offset int64, whence int) (int64, error) {
 
 // Close closes the file and syncs any unwritten data to the underlying device.
 func (fp *File) Close() error {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return fr
 	}
-
+	defer fsys.mu.Unlock()
 	fr = fp.f_close()
 	if fr != frOK {
 		return fr
@@ -262,6 +313,8 @@ func (fp *File) Close() error {
 // underlying device and invalidating all open files and directories pointing
 // to it. The FS can be reused by calling Mount again.
 func (fsys *FS) Unmount() error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	if fsys.fstype == fstypeUnknown {
 		return frNoFilesystem // Not mounted.
 	}
@@ -282,6 +335,8 @@ func (fsys *FS) Unmount() error {
 // Mkdir creates a new directory with the given path. The parent directory
 // must already exist.
 func (fsys *FS) Mkdir(path string) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.f_mkdir(path)
 	if fr != frOK {
 		return fr
@@ -292,6 +347,8 @@ func (fsys *FS) Mkdir(path string) error {
 // Rename renames (moves) oldpath to newpath, which may be in a different
 // directory. Neither file may be open. If newpath already exists Rename fails.
 func (fsys *FS) Rename(oldpath, newpath string) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.f_rename(oldpath, newpath)
 	if fr != frOK {
 		return fr
@@ -301,6 +358,8 @@ func (fsys *FS) Rename(oldpath, newpath string) error {
 
 // Stat stores information describing the named file or directory into info.
 func (fsys *FS) Stat(path string, info *FileInfo) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.f_stat(path, info)
 	if fr != frOK {
 		return fr
@@ -310,6 +369,8 @@ func (fsys *FS) Stat(path string, info *FileInfo) error {
 
 // Remove removes the named file or empty directory from the filesystem.
 func (fsys *FS) Remove(path string) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.f_unlink(path)
 	if fr != frOK {
 		return fr
@@ -319,6 +380,8 @@ func (fsys *FS) Remove(path string) error {
 
 // Sync commits all pending writes of the filesystem to the underlying device.
 func (fsys *FS) Sync() error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.sync()
 	if fr != frOK {
 		return fr
@@ -329,12 +392,12 @@ func (fsys *FS) Sync() error {
 // Sync commits the current contents of the file to the filesystem immediately.
 // It flushes the file's cached data and its directory entry to the device.
 func (fp *File) Sync() error {
-	fr := fp.obj.validate()
+	fsys, fr := fp.lock()
 	if fr != frOK {
 		return fr
 	}
-
-	fr = fp.obj.fs.f_sync(fp)
+	defer fsys.mu.Unlock()
+	fr = fsys.f_sync(fp)
 	if fr != frOK {
 		return fr
 	}
@@ -343,11 +406,17 @@ func (fp *File) Sync() error {
 
 // Mode returns the lowest 2 bits of the file's permission (read, write or both).
 func (fp *File) Mode() Mode {
+	if fsys := fp.obj.fs; fsys != nil {
+		fsys.mu.Lock()
+		defer fsys.mu.Unlock()
+	}
 	return Mode(fp.flag & 3)
 }
 
 // OpenDir opens the named directory for reading.
 func (fsys *FS) OpenDir(dp *Dir, path string) error {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
 	fr := fsys.f_opendir(&dp.dir, path)
 	if fr != frOK {
 		return fr
@@ -356,11 +425,16 @@ func (fsys *FS) OpenDir(dp *Dir, path string) error {
 }
 
 // ForEachFile calls the callback function for each file in the directory.
+//
+// The callback runs with the filesystem lock held: calling any method of
+// the same FS or of its files from within the callback deadlocks.
 func (dp *Dir) ForEachFile(callback func(*FileInfo) error) error {
-	fr := dp.obj.validate()
+	fsys, fr := dp.lock()
 	if fr != frOK {
 		return fr
-	} else if dp.obj.fs.perm&ModeRead == 0 {
+	}
+	defer fsys.mu.Unlock()
+	if fsys.perm&ModeRead == 0 {
 		return errForbiddenMode
 	}
 

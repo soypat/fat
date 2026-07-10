@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/bits"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -23,7 +24,18 @@ type BlockDevice interface {
 // sector index type.
 type lba uint32
 
+// FS is the FAT filesystem type. The zero value is unmounted; call Mount
+// before use. FS must not be copied while mounted.
+//
+// FS and its open files and directories are safe for concurrent use:
+// every exported operation takes a single per-filesystem lock, so calls
+// are serialized, never parallel.
 type FS struct {
+	// mu is the coarse per-filesystem lock. File and Dir operations take
+	// it too: files share the FS's disk access window win[] and FAT/FSInfo
+	// state, so there is no finer grain.
+	mu sync.Mutex
+
 	fstype   fstype
 	nFATs    uint8
 	wflag    uint8  // b0:dirty
@@ -295,7 +307,10 @@ func (fp *File) f_close() fileResult {
 	} else if fr = fp.obj.validate(); fr != frOK {
 		return fr
 	}
-	fp.obj.fs = nil
+	// Invalidate the handle by id instead of clearing obj.fs: the exported
+	// lock path reads obj.fs without holding the lock (see (*File).lock),
+	// so obj.fs must never be written on a live handle.
+	fp.obj.id--
 	return frOK
 }
 

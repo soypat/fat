@@ -182,6 +182,96 @@ func BenchmarkCreateRemove(b *testing.B) {
 	}
 }
 
+func BenchmarkReadAt(b *testing.B) {
+	fsys := mountBench(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeRead); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	size := fp.Size()
+	buf := make([]byte, 64)
+	b.SetBytes(int64(len(buf)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Stride through the file pseudo-randomly.
+		off := int64((i+1)*4099) % (size - int64(len(buf)))
+		if _, err := fp.ReadAt(buf, off); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWriteAt(b *testing.B) {
+	fsys := mountBench(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeRW); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	size := fp.Size()
+	buf := make([]byte, 64)
+	b.SetBytes(int64(len(buf)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Overwrite within the existing file so size stays constant.
+		off := int64((i+1)*4099) % (size - int64(len(buf)))
+		if _, err := fp.WriteAt(buf, off); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWriteString(b *testing.B) {
+	fsys := mountBench(b)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeCreateAlways|ModeRW); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	const s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	b.SetBytes(int64(len(s)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := fp.WriteString(s); err != nil {
+			b.Fatal(err)
+		}
+		if fp.Size() >= 8192 {
+			// Rewind to keep the file from growing unboundedly.
+			if _, err := fp.Seek(0, io.SeekStart); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkTruncate(b *testing.B) {
+	fsys := mountBench(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeRW); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Shrink one cluster then grow back: exercises remove_chain and
+		// the chain-stretching seek every iteration.
+		if err := fp.Truncate(4096); err != nil {
+			b.Fatal(err)
+		}
+		if err := fp.Truncate(8192); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // TestBenchmarksDoNotAllocate pins the 0 allocs/op guarantee in the
 // regular test suite so a regression fails `go test`, not just an eyeballed
 // benchmark run.
@@ -200,6 +290,10 @@ func TestBenchmarksDoNotAllocate(t *testing.T) {
 		{"WriteRewrite", BenchmarkWriteRewrite},
 		{"CreateWriteSmall", BenchmarkCreateWriteSmall},
 		{"CreateRemove", BenchmarkCreateRemove},
+		{"ReadAt", BenchmarkReadAt},
+		{"WriteAt", BenchmarkWriteAt},
+		{"WriteString", BenchmarkWriteString},
+		{"Truncate", BenchmarkTruncate},
 	}
 	for _, bench := range benches {
 		res := testing.Benchmark(bench.fn)
