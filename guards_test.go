@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -343,8 +344,10 @@ func TestFileInfoAccessors(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	err := dir.ForEachFile(func(fi *FileInfo) error {
-		seen[fi.Name()] = true
-		switch fi.Name() {
+		// Lowercase names: the fat_nolfn build reports the uppercase SFN.
+		name := strings.ToLower(fi.Name())
+		seen[name] = true
+		switch name {
 		case "rootfile":
 			if fi.IsDir() {
 				t.Error("rootfile reported as directory")
@@ -352,7 +355,7 @@ func TestFileInfoAccessors(t *testing.T) {
 			if fi.Size() != int64(len(rootFileContents)) {
 				t.Errorf("rootfile size = %d", fi.Size())
 			}
-			if fi.AlternateName() != "ROOTFILE" {
+			if lfnEnabled && fi.AlternateName() != "ROOTFILE" {
 				t.Errorf("altname = %q", fi.AlternateName())
 			}
 			if y := fi.ModTime().Year(); y < 2000 {

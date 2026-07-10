@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -79,7 +80,8 @@ func TestSeekReadBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = dir.ForEachFile(func(fi *FileInfo) error {
-		if fi.Name() == "seektest.dat" {
+		// Case-insensitive: the fat_nolfn build reports the uppercase SFN.
+		if strings.EqualFold(fi.Name(), "seektest.dat") {
 			finfo = *fi
 			found = true
 		}

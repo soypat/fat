@@ -446,7 +446,17 @@ func spotCheckSmall(t *testing.T, dev *BlockByteSlice) {
 	}
 }
 
+// skipIfNoLFN skips golden torture tests on the fat_nolfn build: the scripts
+// are full of long and unicode file names that only exist with LFN support.
+func skipIfNoLFN(t *testing.T) {
+	t.Helper()
+	if !lfnEnabled {
+		t.Skip("golden torture script requires LFN support (built with fat_nolfn)")
+	}
+}
+
 func TestGoldenTortureFAT12(t *testing.T) {
+	skipIfNoLFN(t)
 	dev := goldenDevice(t, "golden-fmt12.img")
 	var fsys FS
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
@@ -464,6 +474,7 @@ func TestGoldenTortureFAT12(t *testing.T) {
 }
 
 func TestGoldenTortureFAT16(t *testing.T) {
+	skipIfNoLFN(t)
 	dev := goldenDevice(t, "golden-fmt16.img")
 	var fsys FS
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
@@ -485,6 +496,7 @@ func TestGoldenTortureFAT16(t *testing.T) {
 // repeatedly (dir_clear/disk_erase), and long chains cross FAT sector
 // boundaries during allocation and removal.
 func TestGoldenTortureFAT32(t *testing.T) {
+	skipIfNoLFN(t)
 	dev := goldenDevice(t, "golden-fmt32.img")
 	var fsys FS
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
