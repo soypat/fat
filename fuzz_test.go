@@ -47,6 +47,17 @@ func FuzzFS(f *testing.F) {
 		who %= uint8(len(finfos))
 		return &finfos[who]
 	}
+	// isOpen reports whether any open handle references the named file.
+	// Duplicate simultaneous opens of the same file are undefined behavior
+	// in FatFs without file locking (FF_FS_LOCK), so the fuzz VM avoids them.
+	isOpen := func(finfos []filinfo, name string) bool {
+		for i := range finfos {
+			if !finfos[i].closed && finfos[i].name == name {
+				return true
+			}
+		}
+		return false
+	}
 	writeData := make([]byte, 1<<16)
 	readData := make([]byte, 1<<16)
 	for i := range writeData {
@@ -56,6 +67,14 @@ func FuzzFS(f *testing.F) {
 		opCloseFile, opOpenFile, opReadFile|(1000<<datasizeOff),
 		opChangeDir, opOpenFile|(1<<whoOff), opWriteFile|(1<<whoOff)|(1000<<datasizeOff),
 		opCloseFile|(1<<whoOff), opOpenFile, opReadFile|(1<<whoOff)|(1001<<datasizeOff),
+	)
+	// Multi-cluster writes (cluster size is 4096) followed by CreateAlways
+	// truncation of the same file: exercises cluster chain allocation,
+	// remove_chain and allocation-hole reuse.
+	f.Add(opCreateFile|(3<<8), opWriteFile|(20000<<datasizeOff),
+		opCloseFile, opCreateFile|(3<<8), opWriteFile|(5000<<datasizeOff),
+		opCloseFile, opOpenFile|(1<<8), opReadFile|(5000<<datasizeOff),
+		opReadFile|(1<<datasizeOff), opCloseFile, opOpenFile|(1<<8), opReadFile|(60000<<datasizeOff),
 	)
 	const totalFSSize = 2 * 32000
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -81,9 +100,12 @@ func FuzzFS(f *testing.F) {
 				}
 
 			case opCreateFile:
+				filename := genName(fs, dir, who)
+				if isOpen(fileinfos, filename) {
+					break // Duplicate open is UB in FatFs without FF_FS_LOCK.
+				}
 				fileinfos = append(fileinfos, filinfo{})
 				info := &fileinfos[len(fileinfos)-1]
-				filename := genName(fs, dir, who)
 				err := fs.OpenFile(&info.file, filename, perm|ModeCreateAlways)
 				if err != nil {
 					fileinfos = fileinfos[:len(fileinfos)-1] // Uncommit file on error.
@@ -92,8 +114,9 @@ func FuzzFS(f *testing.F) {
 
 			case opOpenFile:
 				info := getWho(fileinfos, who)
-				if info == nil || !info.closed {
-					// Don't open already open files for simplicity's sake.
+				if info == nil || !info.closed || isOpen(fileinfos, info.name) {
+					// Don't open already open files: duplicate open is UB
+					// in FatFs without FF_FS_LOCK.
 					break
 				}
 				err := fs.OpenFile(&info.file, info.name, perm|ModeOpenExisting)

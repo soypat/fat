@@ -46,7 +46,7 @@ func newDatetime(t time.Time) datetime {
 }
 
 func (dt datetime) Milliseconds() int {
-	if dt.fine > 100 {
+	if dt.fine >= 100 {
 		return 10 * int(dt.fine-100)
 	}
 	return 10 * int(dt.fine)
@@ -63,7 +63,7 @@ func (dt datetime) Clock() (hour, min, sec int) {
 	hour = int(dt.time >> 11)
 	min = int((dt.time >> 5) & 0x3f)
 	sec = 2 * int(dt.time&0x1f)
-	if dt.fine > 100 {
+	if dt.fine >= 100 {
 		sec += 1
 	}
 	return hour, min, sec
@@ -563,7 +563,7 @@ func (lfnt *longFilenameEntry) FirstCluster() uint16 {
 // ReadNameRaw reads the raw entry name data (26 bytes). It panics if the buffer is too small.
 func (lfnt *longFilenameEntry) ReadData(b []byte) {
 	const lfnChars = (5 + 6 + 2)
-	_ = b[2*lfnChars]
+	_ = b[2*lfnChars-1]
 	copy(b, lfnt.data[1:1+10])
 	copy(b[10:], lfnt.data[14:14+12])
 	copy(b[22:], lfnt.data[28:28+4])

@@ -45,5 +45,6 @@ local.go
 *.gz
 *.tar
 
+!/testdata/*.gz
 # If running a python script.
 */__pycache__/*

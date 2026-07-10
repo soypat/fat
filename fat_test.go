@@ -31,7 +31,7 @@ func TestForEachFile(t *testing.T) {
 }
 
 func TestWriteNew(t *testing.T) {
-	const filename = "deaconblues"
+	const filename = "deaconbl.ues" // 8.3 so the fat_nolfn build accepts it too.
 	const writeData = "\nnew data\n"
 	fs, _ := initTestFAT()
 	var fp File
@@ -157,12 +157,17 @@ func TestFileInfo(t *testing.T) {
 	if fr != frOK {
 		t.Fatal(fr.Error())
 	}
+	// The SFN-only build returns the SFN as the name and has no altname.
+	wantName, wantAlt := "dirfile", "DIRFILE"
+	if !lfnEnabled {
+		wantName, wantAlt = "DIRFILE", ""
+	}
 	name := finfo.Name()
-	if name != "dirfile" {
+	if name != wantName {
 		t.Errorf("mismatched name %q", name)
 	}
 	alt := finfo.AlternateName()
-	if alt != "DIRFILE" {
+	if alt != wantAlt {
 		t.Errorf("mismatched alternate name: %q", alt)
 	}
 }
@@ -187,6 +192,11 @@ func DefaultFATByteBlocks(numBlocks int) BlockDeviceExtended {
 		buf: buf,
 	}
 }
+
+// lfnEnabled reports whether this build has long file name support
+// (false when built with the fat_nolfn tag, which makes lfnbuffer empty).
+var lfnEnabled = len(lfnbuffer{}) != 0
+
 func mustBeOK(t *testing.T, fr fileResult) {
 	t.Helper()
 	if fr != frOK {
