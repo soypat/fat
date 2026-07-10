@@ -266,3 +266,233 @@ func TestRemoveReallocate(t *testing.T) {
 		t.Error("neighbor file corrupted by reallocation")
 	}
 }
+
+func TestReadAtWriteAt(t *testing.T) {
+	fs, _ := initTestFAT()
+	var f File
+	if err := fs.OpenFile(&f, "at.dat", ModeCreateAlways|ModeRW); err != nil {
+		t.Fatal(err)
+	}
+	// Two clusters of patterned data (cluster size 8*512=4096).
+	const size = 2 * 4096
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i*13 + 5)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	// Position offset mid-file; ReadAt/WriteAt must not disturb it.
+	const cur = 1000
+	if _, err := f.Seek(cur, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+
+	// ReadAt at a misaligned cross-cluster offset.
+	buf := make([]byte, 300)
+	n, err := f.ReadAt(buf, 4000)
+	if err != nil || n != len(buf) {
+		t.Fatalf("ReadAt: n=%d err=%v", n, err)
+	}
+	if !bytes.Equal(buf, data[4000:4300]) {
+		t.Error("ReadAt content mismatch")
+	}
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != cur {
+		t.Fatalf("ReadAt moved offset to %d, want %d", pos, cur)
+	}
+
+	// ReadAt clipped at EOF returns io.EOF.
+	n, err = f.ReadAt(buf, size-100)
+	if n != 100 || err != io.EOF {
+		t.Fatalf("ReadAt at EOF: n=%d err=%v", n, err)
+	}
+	// ReadAt past EOF must not extend the file even in write mode.
+	if n, err = f.ReadAt(buf, size+5000); n != 0 || err != io.EOF {
+		t.Fatalf("ReadAt past EOF: n=%d err=%v", n, err)
+	}
+	if f.Size() != size {
+		t.Fatalf("ReadAt past EOF grew file to %d", f.Size())
+	}
+	if _, err = f.ReadAt(buf, -1); err != errNegativeOffset {
+		t.Fatalf("ReadAt negative offset: %v", err)
+	}
+
+	// WriteAt overwrite mid-file preserves offset.
+	repl := []byte("HELLOWORLD")
+	n, err = f.WriteAt(repl, 4090) // Straddles cluster boundary.
+	if err != nil || n != len(repl) {
+		t.Fatalf("WriteAt: n=%d err=%v", n, err)
+	}
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != cur {
+		t.Fatalf("WriteAt moved offset to %d, want %d", pos, cur)
+	}
+	copy(data[4090:], repl)
+	if _, err = f.ReadAt(buf, 4000); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf, data[4000:4300]) {
+		t.Error("WriteAt content mismatch")
+	}
+
+	// WriteAt past EOF extends the file.
+	if _, err = f.WriteAt([]byte("tail"), size+100); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != size+104 {
+		t.Fatalf("WriteAt past EOF: size=%d want %d", f.Size(), size+104)
+	}
+	if _, err = f.WriteAt(repl, -1); err != errNegativeOffset {
+		t.Fatalf("WriteAt negative offset: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// WriteAt on read-only handle fails; ReadAt still works and preserves offset.
+	if err := fs.OpenFile(&f, "at.dat", ModeRead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteAt(repl, 0); err == nil {
+		t.Fatal("WriteAt on read-only file succeeded")
+	}
+	if _, err = f.ReadAt(buf, 4000); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf, data[4000:4300]) {
+		t.Error("read-only ReadAt content mismatch")
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteString(t *testing.T) {
+	fs, _ := initTestFAT()
+	var f File
+	if err := fs.OpenFile(&f, "ws.dat", ModeCreateAlways|ModeRW); err != nil {
+		t.Fatal(err)
+	}
+	const s = "written by WriteString"
+	n, err := f.WriteString(s)
+	if err != nil || n != len(s) {
+		t.Fatalf("WriteString: n=%d err=%v", n, err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(s))
+	if _, err := io.ReadFull(&f, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != s {
+		t.Errorf("read back %q, want %q", buf, s)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	fs, _ := initTestFAT()
+	var f File
+	if err := fs.OpenFile(&f, "trunc.dat", ModeCreateAlways|ModeRW); err != nil {
+		t.Fatal(err)
+	}
+	// Three clusters of patterned data.
+	const size = 3 * 4096
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i*7 + 3)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != size {
+		t.Fatalf("Size=%d want %d", f.Size(), size)
+	}
+
+	// Shrink to a misaligned mid-file size; offset (at EOF) clamps to new size.
+	const shrunk = 4096 + 100
+	if err := f.Truncate(shrunk); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != shrunk {
+		t.Fatalf("after shrink Size=%d want %d", f.Size(), shrunk)
+	}
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != shrunk {
+		t.Fatalf("offset after shrink = %d, want %d", pos, shrunk)
+	}
+	// Data before the truncation point intact.
+	buf := make([]byte, shrunk)
+	if _, err := f.ReadAt(buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf, data[:shrunk]) {
+		t.Error("content mismatch after shrink")
+	}
+
+	// Truncate with offset before the cut leaves offset alone.
+	if _, err := f.Seek(50, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1000); err != nil {
+		t.Fatal(err)
+	}
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != 50 {
+		t.Fatalf("offset after shrink = %d, want 50", pos)
+	}
+
+	// Grow: size changes, gap writable, offset untouched.
+	if err := f.Truncate(2 * 4096); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != 2*4096 {
+		t.Fatalf("after grow Size=%d want %d", f.Size(), 2*4096)
+	}
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != 50 {
+		t.Fatalf("offset after grow = %d, want 50", pos)
+	}
+	if _, err := f.WriteAt([]byte("gap"), 2*4096-3); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shrink to zero removes the whole chain.
+	if err := f.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != 0 {
+		t.Fatalf("after zero-truncate Size=%d", f.Size())
+	}
+	if err := f.Truncate(-1); err != errNegativeOffset {
+		t.Fatalf("negative truncate: %v", err)
+	}
+	// Write after zero-truncate reallocates a fresh chain.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Truncated size persisted to directory entry; read-only Truncate fails.
+	if err := fs.OpenFile(&f, "trunc.dat", ModeRead); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != 5 {
+		t.Fatalf("persisted Size=%d want 5", f.Size())
+	}
+	if err := f.Truncate(0); err == nil {
+		t.Fatal("Truncate on read-only file succeeded")
+	}
+	buf = make([]byte, 5)
+	if _, err := f.ReadAt(buf, 0); err != nil || string(buf) != "fresh" {
+		t.Fatalf("read back %q err=%v", buf, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

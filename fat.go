@@ -461,7 +461,6 @@ func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 	} else if fs.fstype == fstypeExFAT {
 		return frUnsupported
 	}
-	path += "\x00" // TODO(soypat): change internal algorithms to non-null terminated strings.
 
 	dp.obj.fs = fs
 
@@ -498,7 +497,6 @@ func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 // f_open opens or creates a file.
 func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fsys.trace("f_open", slog.String("name", name), slog.Uint64("mode", uint64(mode)))
-	name += "\x00" // TODO(soypat): change internal algorithms to non-null terminated strings.
 	if fp == nil {
 		return frInvalidObject
 	} else if fsys.fstype == fstypeExFAT {
@@ -815,10 +813,49 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 	return frOK
 }
 
+// f_truncate truncates the file to the current read/write pointer,
+// removing the cluster chain past fptr. No-op when fptr is at or past EOF.
+func (fp *File) f_truncate() (res fileResult) {
+	fsys := fp.obj.fs
+	fsys.trace("f_truncate")
+	if fp.fptr >= fp.obj.objsize {
+		return frOK
+	}
+	if fp.fptr == 0 {
+		// Set file size to zero: remove entire cluster chain.
+		res = fp.obj.remove_chain(fp.obj.sclust, 0)
+		fp.obj.sclust = 0
+	} else {
+		// Truncate part of the file: remove clusters after the current one.
+		ncl := fp.obj.clusterstat(fp.clust)
+		res = frOK
+		if ncl == badCluster {
+			res = frDiskErr
+		} else if ncl == 1 {
+			res = frIntErr
+		}
+		if res == frOK && ncl < fsys.n_fatent {
+			res = fp.obj.remove_chain(ncl, fp.clust)
+		}
+	}
+	fp.obj.objsize = fp.fptr // Set file size to current read/write point.
+	fp.flag |= faMODIFIED
+	if res == frOK && fp.flag&faDIRTY != 0 {
+		if fsys.disk_write(fp.buf[:], fp.sect, 1) != drOK {
+			res = frDiskErr
+		} else {
+			fp.flag &^= faDIRTY
+		}
+	}
+	if res != frOK {
+		return fp.abort(res)
+	}
+	return frOK
+}
+
 // f_unlink removes a file or an empty sub-directory at path.
 func (fsys *FS) f_unlink(path string) (res fileResult) {
 	fsys.trace("f_unlink", slog.String("path", path))
-	path += "\x00" // TODO(soypat): change internal algorithms to non-null terminated strings.
 	if fsys.fstype == fstypeExFAT {
 		return frUnsupported
 	} else if fsys.perm&ModeWrite == 0 {

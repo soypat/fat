@@ -113,6 +113,10 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 	fsys.trace("dir:create_name")
 	var wc uint16
 	for {
+		if len(p) == 0 {
+			wc = 0
+			break // Break on end of path.
+		}
 		uc, plen := utf8.DecodeRuneInString(p)
 		if uc == utf8.RuneError {
 			return "", frInvalidName
@@ -146,7 +150,7 @@ func (dp *dir) create_name(path string) (string, fileResult) {
 		cf = nsLAST // Stopped at last segment (end of path).
 	} else {
 		p = trimSeparatorPrefix(p)
-		if len(p) > 0 && isTermLFN(p[0]) {
+		if len(p) == 0 || isTermLFN(p[0]) {
 			cf = nsLAST
 		}
 	}

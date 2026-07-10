@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"time"
+	"unsafe"
 )
 
 // Mode represents the file access mode used in Open.
@@ -25,10 +26,11 @@ const (
 )
 
 var (
-	errInvalidMode   = errors.New("invalid fat access mode")
-	errForbiddenMode = errors.New("forbidden fat access mode")
-	errWhence        = errors.New("fat: invalid whence")
-	errNegativeSeek  = errors.New("fat: negative seek position")
+	errInvalidMode    = errors.New("invalid fat access mode")
+	errForbiddenMode  = errors.New("forbidden fat access mode")
+	errWhence         = errors.New("fat: invalid whence")
+	errNegativeSeek   = errors.New("fat: negative seek position")
+	errNegativeOffset = errors.New("fat: negative offset")
 )
 
 // Dir represents an open FAT directory.
@@ -94,8 +96,121 @@ func (fp *File) Write(buf []byte) (int, error) {
 	bw, fr := fp.f_write(buf)
 	if fr != frOK {
 		return bw, fr
+	} else if bw < len(buf) {
+		return bw, io.ErrShortWrite // Disk full.
 	}
 	return bw, nil
+}
+
+// WriteString writes the contents of s to the File without copying it
+// to a byte slice. It implements the [io.StringWriter] interface.
+func (fp *File) WriteString(s string) (int, error) {
+	// f_write never modifies the source buffer so this is safe.
+	return fp.Write(unsafe.Slice(unsafe.StringData(s), len(s)))
+}
+
+// ReadAt reads len(p) bytes from the File starting at byte offset off. It
+// implements the [io.ReaderAt] interface: the offset used by Read, Write and
+// Seek is saved and restored, so ReadAt neither affects nor is affected by it.
+// When fewer than len(p) bytes are read it returns a non-nil error (io.EOF at
+// end of file).
+func (fp *File) ReadAt(p []byte, off int64) (int, error) {
+	fr := fp.obj.validate()
+	if fr != frOK {
+		return 0, fr
+	} else if off < 0 {
+		return 0, errNegativeOffset
+	} else if off >= fp.obj.objsize {
+		// Checked before seeking since f_lseek past EOF in write mode
+		// would grow the file.
+		return 0, io.EOF
+	}
+	cur := fp.fptr
+	fr = fp.f_lseek(off)
+	if fr != frOK {
+		return 0, fr
+	}
+	n, fr := fp.f_read(p)
+	if frs := fp.f_lseek(cur); fr == frOK {
+		fr = frs
+	}
+	if fr != frOK {
+		return n, fr
+	} else if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// WriteAt writes len(p) bytes to the File starting at byte offset off. It
+// implements the [io.WriterAt] interface: the offset used by Read, Write and
+// Seek is saved and restored, so WriteAt does not affect it. Writing past the
+// end of the file extends it; the contents of any gap are undefined.
+func (fp *File) WriteAt(p []byte, off int64) (int, error) {
+	fr := fp.obj.validate()
+	if fr != frOK {
+		return 0, fr
+	} else if off < 0 {
+		return 0, errNegativeOffset
+	} else if fp.flag&faWrite == 0 {
+		return 0, frWriteProtected
+	}
+	cur := fp.fptr
+	fr = fp.f_lseek(off)
+	if fr != frOK {
+		return 0, fr
+	}
+	n, fr := fp.f_write(p)
+	if frs := fp.f_lseek(cur); fr == frOK {
+		fr = frs
+	}
+	if fr != frOK {
+		return n, fr
+	} else if n < len(p) {
+		return n, io.ErrShortWrite // Disk full.
+	}
+	return n, nil
+}
+
+// Size returns the current size of the file in bytes, including data
+// written but not yet synced to the device.
+func (fp *File) Size() int64 {
+	return fp.obj.objsize
+}
+
+// Truncate changes the size of the file to size, discarding data past the new
+// end when shrinking and extending the file when growing (the contents of the
+// extension are undefined). The file must be open for writing. If the current
+// offset is beyond the new size it is moved to the new end of file; otherwise
+// Truncate does not affect it.
+func (fp *File) Truncate(size int64) error {
+	fr := fp.obj.validate()
+	if fr != frOK {
+		return fr
+	} else if fp.err != frOK {
+		return fp.err
+	} else if size < 0 {
+		return errNegativeOffset
+	} else if fp.flag&faWrite == 0 || fp.obj.fs.perm&ModeWrite == 0 {
+		return frWriteProtected
+	}
+	cur := fp.fptr
+	// Seeking grows the cluster chain when size exceeds the file size,
+	// and positions fptr for f_truncate to shrink to when below it.
+	fr = fp.f_lseek(size)
+	if fr == frOK {
+		fr = fp.f_truncate()
+	}
+	if cur > size {
+		cur = size
+	}
+	if frs := fp.f_lseek(cur); fr == frOK {
+		fr = frs
+	}
+	if fr != frOK {
+		return fr
+	}
+	return nil
 }
 
 // Seek sets the offset for the next Read or Write on the file to offset,
