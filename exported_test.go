@@ -496,3 +496,153 @@ func TestTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMkdirStatRename(t *testing.T) {
+	fs, _ := initTestFAT()
+
+	// Mkdir in root, then nested.
+	if err := fs.Mkdir("newdir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Mkdir("newdir"); err == nil {
+		t.Error("expected error creating existing directory")
+	}
+	if err := fs.Mkdir("newdir/nested"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Mkdir("no/such/parent"); err == nil {
+		t.Error("expected error creating directory with missing parent")
+	}
+
+	// Stat directory.
+	var info FileInfo
+	if err := fs.Stat("newdir", &info); err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Error("Stat: newdir not reported as directory")
+	}
+
+	// Create a file inside the nested directory and stat it.
+	var f File
+	if err := fs.OpenFile(&f, "newdir/nested/hello.txt", ModeCreateAlways|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("hello world"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Stat("newdir/nested/hello.txt", &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() || info.Size() != 11 {
+		t.Errorf("Stat: IsDir=%v Size=%d, want file of size 11", info.IsDir(), info.Size())
+	}
+	if err := fs.Stat("nonexistent", &info); err == nil {
+		t.Error("expected error statting nonexistent file")
+	}
+
+	readBack := func(path, want string) {
+		t.Helper()
+		var rf File
+		if err := fs.OpenFile(&rf, path, ModeRead); err != nil {
+			t.Fatalf("open %q: %v", path, err)
+		}
+		buf := make([]byte, len(want))
+		if _, err := rf.ReadAt(buf, 0); err != nil || string(buf) != want {
+			t.Fatalf("read %q: got %q err=%v", path, buf, err)
+		}
+		rf.Close()
+	}
+
+	// Rename within same directory.
+	if err := fs.Rename("newdir/nested/hello.txt", "newdir/nested/bye.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Stat("newdir/nested/hello.txt", &info); err == nil {
+		t.Error("old name still exists after Rename")
+	}
+	readBack("newdir/nested/bye.txt", "hello world")
+
+	// Move file across directories.
+	if err := fs.Rename("newdir/nested/bye.txt", "moved.txt"); err != nil {
+		t.Fatal(err)
+	}
+	readBack("moved.txt", "hello world")
+
+	// Rename to existing name must fail.
+	if err := fs.Rename("moved.txt", "rootfile"); err == nil {
+		t.Error("expected error renaming to existing name")
+	}
+	if err := fs.Rename("nonexistent", "whatever"); err == nil {
+		t.Error("expected error renaming nonexistent file")
+	}
+
+	// Move a directory into another directory: ".." entry must be updated
+	// so paths through the moved directory keep working.
+	if err := fs.OpenFile(&f, "newdir/nested/inner.txt", ModeCreateAlways|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("inner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Rename("newdir/nested", "nested"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Stat("newdir/nested", &info); err == nil {
+		t.Error("directory still at old path after Rename")
+	}
+	readBack("nested/inner.txt", "inner")
+	if err := fs.Mkdir("nested/sub"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnmount(t *testing.T) {
+	fs, dev := initTestFAT()
+
+	var f File
+	if err := fs.OpenFile(&f, "um.txt", ModeCreateAlways|ModeWrite); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("data"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Operations after unmount must fail.
+	if err := fs.OpenFile(&f, "um.txt", ModeRead); err == nil {
+		t.Error("OpenFile succeeded after Unmount")
+	}
+	if err := fs.Mkdir("x"); err == nil {
+		t.Error("Mkdir succeeded after Unmount")
+	}
+	if err := fs.Stat("um.txt", nil); err == nil {
+		t.Error("Stat succeeded after Unmount")
+	}
+	if err := fs.Unmount(); err == nil {
+		t.Error("double Unmount succeeded")
+	}
+
+	// Remount: data persisted.
+	if err := fs.Mount(dev, int(dev.BlockSize()), ModeRW); err != nil {
+		t.Fatal(err)
+	}
+	var info FileInfo
+	if err := fs.Stat("um.txt", &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 4 {
+		t.Errorf("Size=%d after remount, want 4", info.Size())
+	}
+}

@@ -258,6 +258,56 @@ func (fp *File) Close() error {
 	return nil
 }
 
+// Unmount unmounts the FAT filesystem, syncing any pending writes to the
+// underlying device and invalidating all open files and directories pointing
+// to it. The FS can be reused by calling Mount again.
+func (fsys *FS) Unmount() error {
+	if fsys.fstype == fstypeUnknown {
+		return frNoFilesystem // Not mounted.
+	}
+	var fr fileResult = frOK
+	if fsys.perm&ModeWrite != 0 {
+		fr = fsys.sync()
+	}
+	fsys.fstype = fstypeUnknown // Invalidate the filesystem object.
+	fsys.id++                   // Invalidate open files and directories.
+	fsys.perm = 0
+	fsys.device = nil
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
+// Mkdir creates a new directory with the given path. The parent directory
+// must already exist.
+func (fsys *FS) Mkdir(path string) error {
+	fr := fsys.f_mkdir(path)
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
+// Rename renames (moves) oldpath to newpath, which may be in a different
+// directory. Neither file may be open. If newpath already exists Rename fails.
+func (fsys *FS) Rename(oldpath, newpath string) error {
+	fr := fsys.f_rename(oldpath, newpath)
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
+// Stat stores information describing the named file or directory into info.
+func (fsys *FS) Stat(path string, info *FileInfo) error {
+	fr := fsys.f_stat(path, info)
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
 // Remove removes the named file or empty directory from the filesystem.
 func (fsys *FS) Remove(path string) error {
 	fr := fsys.f_unlink(path)

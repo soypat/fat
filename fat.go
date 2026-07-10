@@ -900,6 +900,158 @@ func (fsys *FS) f_unlink(path string) (res fileResult) {
 	return res
 }
 
+// f_stat looks up the file or sub-directory at path and stores its
+// information into fno when non-nil. Returns frInvalidName for the origin
+// (root) directory since it has no directory entry of its own.
+func (fsys *FS) f_stat(path string, fno *FileInfo) (res fileResult) {
+	fsys.trace("f_stat", slog.String("path", path))
+	if fsys.fstype == fstypeExFAT {
+		return frUnsupported
+	}
+	var dj dir
+	dj.obj.fs = fsys
+	res = dj.follow_path(path)
+	if res == frOK {
+		if dj.fn[nsFLAG]&nsNONAME != 0 {
+			res = frInvalidName // It is origin directory.
+		} else if fno != nil {
+			dj.get_fileinfo(fno)
+		}
+	}
+	if fno != nil && res != frOK {
+		fno.fname[0] = 0 // Invalidate file information on error.
+	}
+	return res
+}
+
+// f_mkdir creates a new sub-directory at path.
+func (fsys *FS) f_mkdir(path string) (res fileResult) {
+	fsys.trace("f_mkdir", slog.String("path", path))
+	if fsys.fstype == fstypeExFAT {
+		return frUnsupported
+	} else if fsys.perm&ModeWrite == 0 {
+		return frWriteProtected
+	}
+	var dj dir
+	dj.obj.fs = fsys
+	res = dj.follow_path(path)
+	if res == frOK {
+		if dj.fn[nsFLAG]&(nsDOT|nsNONAME) != 0 {
+			return frInvalidName
+		}
+		return frExist // Name collision.
+	} else if res != frNoFile {
+		return res
+	}
+
+	// It is clear to create a new directory.
+	sobj := objid{fs: fsys}     // New object ID to create a new chain.
+	dcl := sobj.create_chain(0) // Allocate a cluster for the new directory table.
+	switch dcl {
+	case 0:
+		return frDenied // No space to allocate a new cluster.
+	case 1:
+		return frIntErr
+	case badCluster:
+		return frDiskErr
+	}
+	tm := fsys.time()
+	res = fsys.dir_clear(dcl) // Clean up the new table.
+	if res == frOK {
+		// Create dot entries: "." then "..". dir_clear left the window at
+		// the top of the new cluster with zeroed contents.
+		for i := 0; i < 11; i++ {
+			fsys.win[dirNameOff+i] = ' '
+		}
+		fsys.win[dirNameOff] = '.'
+		fsys.win[dirAttrOff] = amDIR
+		binary.LittleEndian.PutUint32(fsys.win[dirModTimeOff:], tm)
+		fsys.st_clust(fsys.win[:], dcl)
+		copy(fsys.win[sizeDirEntry:2*sizeDirEntry], fsys.win[:sizeDirEntry]) // Create ".." entry.
+		fsys.win[sizeDirEntry+1] = '.'
+		fsys.st_clust(fsys.win[sizeDirEntry:], dj.obj.sclust) // Containing directory; 0 means root.
+		fsys.wflag = 1
+		res = dj.register() // Register the object to the parent directory.
+	}
+	if res != frOK {
+		sobj.remove_chain(dcl, 0) // Could not register, remove the allocated cluster.
+		return res
+	}
+	binary.LittleEndian.PutUint32(dj.dir[dirCrtTimeOff:], tm)
+	binary.LittleEndian.PutUint32(dj.dir[dirModTimeOff:], tm)
+	fsys.st_clust(dj.dir, dcl) // Table start cluster.
+	dj.dir[dirAttrOff] = amDIR
+	fsys.wflag = 1
+	return fsys.sync()
+}
+
+// f_rename renames and/or moves the file or sub-directory at oldpath to newpath.
+func (fsys *FS) f_rename(oldpath, newpath string) (res fileResult) {
+	fsys.trace("f_rename", slog.String("old", oldpath), slog.String("new", newpath))
+	if fsys.fstype == fstypeExFAT {
+		return frUnsupported
+	} else if fsys.perm&ModeWrite == 0 {
+		return frWriteProtected
+	}
+	var djo dir
+	djo.obj.fs = fsys
+	res = djo.follow_path(oldpath) // Check old object.
+	if res != frOK {
+		return res
+	} else if djo.fn[nsFLAG]&(nsDOT|nsNONAME) != 0 {
+		return frInvalidName // The object must be a real object.
+	}
+	var buf [sizeDirEntry]byte
+	copy(buf[:], djo.dir[:sizeDirEntry]) // Save directory entry of the object.
+	djn := djo                           // Duplicate the directory object.
+	res = djn.follow_path(newpath)       // Make sure new object name is not in use.
+	if res == frOK {
+		// Is new name already in use by another object?
+		if djn.obj.sclust == djo.obj.sclust && djn.dptr == djo.dptr {
+			res = frNoFile
+		} else {
+			res = frExist
+		}
+	}
+	if res != frNoFile {
+		return res // It is a valid path and no name collision only on frNoFile.
+	}
+	res = djn.register() // Register the new entry.
+	if res != frOK {
+		return res
+	}
+	// Copy directory entry of the object except name.
+	bdir := djn.dir
+	copy(bdir[13:sizeDirEntry], buf[13:])
+	bdir[dirAttrOff] = buf[dirAttrOff]
+	if bdir[dirAttrOff]&amDIR == 0 {
+		bdir[dirAttrOff] |= amARC // Set archive attribute if it is a file.
+	}
+	fsys.wflag = 1
+	if bdir[dirAttrOff]&amDIR != 0 && djo.obj.sclust != djn.obj.sclust {
+		// Update ".." entry in the sub-directory being moved to a new containing directory.
+		sect := fsys.clst2sect(fsys.ld_clust(bdir))
+		if sect == 0 {
+			return frIntErr
+		}
+		// Start of critical section where an interruption can cause a cross-link.
+		res = fsys.move_window(sect)
+		bdir = fsys.win[sizeDirEntry:] // Pointer to ".." entry.
+		if res == frOK && bdir[1] == '.' {
+			fsys.st_clust(bdir, djn.obj.sclust)
+			fsys.wflag = 1
+		}
+	}
+	if res == frOK {
+		res = djo.dir_remove() // Remove old entry.
+		if res == frOK {
+			res = fsys.sync()
+		}
+	}
+	// End of the critical section.
+	return res
+}
+
 // dir_remove removes the directory entry pointed to by dp, including the LFN
 // entries of the block when present.
 func (dp *dir) dir_remove() (res fileResult) {
@@ -1780,7 +1932,9 @@ func (dp *dir) follow_path(path string) (fr fileResult) {
 	dp.obj.sclust = 0 // Set start directory (always root dir)
 
 	dp.obj.n_frag = 0 // Invalidate last fragment counter.
-	if fsys.fstype == fstypeExFAT {
+	if fsys.fstype == fstypeUnknown {
+		return frNoFilesystem // Not mounted.
+	} else if fsys.fstype == fstypeExFAT {
 		return frUnsupported // TODO(soypat): implement exFAT.
 	}
 	if len(path) == 0 || isTermLFN(path[0]) {
