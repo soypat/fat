@@ -77,13 +77,13 @@ func TestReadOnlyMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	var f File
-	if err := fsys.OpenFile(&f, "c.dat", ModeWrite); err != errForbiddenMode {
+	if err := fsys.OpenFile(&f, "cc.dat", ModeWrite); err != errForbiddenMode {
 		t.Errorf("write open on RO mount: %v", err)
 	}
-	if err := fsys.Remove("c.dat"); err == nil {
+	if err := fsys.Remove("cc.dat"); err == nil {
 		t.Error("expected error removing on RO mount")
 	}
-	if err := fsys.OpenFile(&f, "c.dat", ModeRead); err != nil {
+	if err := fsys.OpenFile(&f, "cc.dat", ModeRead); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 16)

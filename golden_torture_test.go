@@ -11,8 +11,9 @@ import (
 )
 
 // The golden torture tests replay deterministic operation scripts using only
-// the exported high-level API (Mount, OpenFile, Write, Read, Seek, Close,
-// Sync, Remove) starting from a freshly formatted image produced by the
+// the exported high-level API (Mount, OpenFile, Write, WriteString, WriteAt,
+// Read, ReadAt, Seek, Size, Truncate, Close, Sync, Remove, Mkdir, Rename,
+// Stat, Unmount) starting from a freshly formatted image produced by the
 // original FatFs ff16 library. The resulting image is compared byte-for-byte
 // with the corresponding golden image produced by the companion C program
 // testdata/mkgolden.c which drives ff16 through the identical script.
@@ -137,11 +138,39 @@ func writeStr(t *testing.T, fsys *FS, name, content string) {
 	if err := fsys.OpenFile(&f, name, ModeCreateAlways|ModeWrite); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
-	if _, err := f.Write([]byte(content)); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", name, err)
+	}
+}
+
+// writeAtPat writes n patterned bytes (pattern index starting at 0) at
+// absolute file offset off using WriteAt.
+func writeAtPat(t *testing.T, f *File, tag int, off int64, n int) {
+	t.Helper()
+	buf := make([]byte, n)
+	for i := range buf {
+		buf[i] = pat(tag, i)
+	}
+	if nw, err := f.WriteAt(buf, off); err != nil || nw != n {
+		t.Fatalf("WriteAt(tag=%d, off=%d): n=%d err=%v", tag, off, nw, err)
+	}
+}
+
+// checkPatAt reads n bytes at offset off via ReadAt and requires them to
+// match the tag pattern starting at pattern index patStart.
+func checkPatAt(t *testing.T, f *File, name string, tag int, off int64, n, patStart int) {
+	t.Helper()
+	buf := make([]byte, n)
+	if nr, err := f.ReadAt(buf, off); err != nil || nr != n {
+		t.Fatalf("ReadAt %s off=%d: n=%d err=%v", name, off, nr, err)
+	}
+	for i, b := range buf {
+		if b != pat(tag, patStart+i) {
+			t.Fatalf("%s[%d] = %#02x, want tag-%d pattern %#02x", name, off+int64(i), b, tag, pat(tag, patStart+i))
+		}
 	}
 }
 
@@ -270,6 +299,74 @@ func tortureScriptSmall(t *testing.T, fsys *FS) {
 	if err := fsys.Remove("collision test file 07.dat"); err != nil {
 		t.Fatalf("remove collision 07: %v", err)
 	}
+
+	// S16: sub-directories: subdir and nested one inside it.
+	if err := fsys.Mkdir("subdir"); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := fsys.Mkdir("subdir/nested"); err != nil {
+		t.Fatalf("mkdir subdir/nested: %v", err)
+	}
+
+	// S17: files inside the new directories.
+	writeStr(t, fsys, "subdir/deep.txt", "deep blue")
+	writeStr(t, fsys, "subdir/nested/leaf.txt", "leaf")
+
+	// S18: positional writes on c.dat: 1500 bytes at 2000 (tag 9) inside
+	// the file and 1000 bytes at 44000 (tag 10) past EOF 43000, extending
+	// the file to 45000.
+	if err := fsys.OpenFile(&f, "c.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open c.dat writeat: %v", err)
+	}
+	writeAtPat(t, &f, 9, 2000, 1500)
+	writeAtPat(t, &f, 10, 44000, 1000)
+	if f.Size() != 45000 {
+		t.Fatalf("c.dat Size() = %d, want 45000", f.Size())
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close c.dat writeat: %v", err)
+	}
+
+	// S19: truncation: c.dat 45000 -> 20000 (drops chain tail), a.dat -> 0
+	// (removes whole chain) then rewrite as "reborn".
+	if err := fsys.OpenFile(&f, "c.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open c.dat trunc: %v", err)
+	}
+	if err := f.Truncate(20000); err != nil {
+		t.Fatalf("truncate c.dat: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close c.dat trunc: %v", err)
+	}
+	if err := fsys.OpenFile(&f, "a.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open a.dat trunc: %v", err)
+	}
+	if err := f.Truncate(0); err != nil {
+		t.Fatalf("truncate a.dat: %v", err)
+	}
+	if _, err := f.WriteString("reborn"); err != nil {
+		t.Fatalf("rewrite a.dat: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close a.dat trunc: %v", err)
+	}
+
+	// S20: rename within the root directory.
+	if err := fsys.Rename("c.dat", "cc.dat"); err != nil {
+		t.Fatalf("rename c.dat: %v", err)
+	}
+
+	// S21: move an LFN file into a sub-directory.
+	if err := fsys.Rename("collision test file 08.dat", "subdir/collision east.dat"); err != nil {
+		t.Fatalf("move collision 08: %v", err)
+	}
+
+	// S22: move a directory to the root: its .. entry must be rewritten.
+	// Then create a file through the moved path.
+	if err := fsys.Rename("subdir/nested", "nested2"); err != nil {
+		t.Fatalf("move nested: %v", err)
+	}
+	writeStr(t, fsys, "nested2/after.txt", "moved dir works")
 }
 
 // spotCheckSmall re-mounts the device read-only and verifies file contents
@@ -279,26 +376,30 @@ func spotCheckSmall(t *testing.T, dev *BlockByteSlice) {
 	if err := fsys.Mount(dev, 512, ModeRead); err != nil {
 		t.Fatalf("verify re-mount: %v", err)
 	}
-	// c.dat: 6 clusters tag 4, overwritten at 12345 with 5000 tag-6 bytes,
-	// stretched to 43000 with tag-7 tail at 40000.
-	got := readAllFile(t, &fsys, "c.dat")
-	if len(got) != 43000 {
-		t.Fatalf("c.dat size = %d, want 43000", len(got))
+	// cc.dat (renamed from c.dat): tag 4 base, tag-9 overwrite at 2000,
+	// tag-6 overwrite at 12345, truncated from 45000 to 20000.
+	var f File
+	if err := fsys.OpenFile(&f, "cc.dat", ModeRead); err != nil {
+		t.Fatalf("open cc.dat: %v", err)
 	}
-	for i, b := range got[:12345] {
-		if b != pat(4, i) {
-			t.Fatalf("c.dat[%d] = %#02x, want tag-4 pattern %#02x", i, b, pat(4, i))
-		}
+	if f.Size() != 20000 {
+		t.Fatalf("cc.dat Size() = %d, want 20000", f.Size())
 	}
-	for i := 0; i < 5000; i++ {
-		if got[12345+i] != pat(6, i) {
-			t.Fatalf("c.dat[%d] tag-6 mismatch", 12345+i)
-		}
+	checkPatAt(t, &f, "cc.dat", 4, 0, 2000, 0)
+	checkPatAt(t, &f, "cc.dat", 9, 2000, 1500, 0)
+	checkPatAt(t, &f, "cc.dat", 4, 3500, 12345-3500, 3500)
+	checkPatAt(t, &f, "cc.dat", 6, 12345, 5000, 0)
+	checkPatAt(t, &f, "cc.dat", 4, 17345, 20000-17345, 17345)
+	// ReadAt straddling EOF returns the short count and io.EOF.
+	buf := make([]byte, 20)
+	if n, err := f.ReadAt(buf, 19990); n != 10 || err != io.EOF {
+		t.Fatalf("cc.dat ReadAt at EOF: n=%d err=%v, want 10, io.EOF", n, err)
 	}
-	for i := 0; i < 3000; i++ {
-		if got[40000+i] != pat(7, i) {
-			t.Fatalf("c.dat[%d] tag-7 mismatch", 40000+i)
-		}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close cc.dat: %v", err)
+	}
+	if err := fsys.OpenFile(&f, "c.dat", ModeRead); err == nil {
+		t.Fatal("c.dat still exists after Rename")
 	}
 	if got := readAllFile(t, &fsys, "ñandú.txt"); len(got) != 100 || got[99] != pat(8, 99) {
 		t.Fatalf("ñandú.txt content mismatch (len %d)", len(got))
@@ -306,18 +407,42 @@ func spotCheckSmall(t *testing.T, dev *BlockByteSlice) {
 	if got := readAllFile(t, &fsys, "😀emoji😀.txt"); len(got) != 50 {
 		t.Fatalf("emoji file length = %d, want 50", len(got))
 	}
-	if got := readAllFile(t, &fsys, "a.dat"); len(got) != 2*4096 || got[0] != pat(5, 0) {
-		t.Fatalf("a.dat not truncated/rewritten correctly (len %d)", len(got))
+	// a.dat: truncated to zero then rewritten via WriteString.
+	if got := readAllFile(t, &fsys, "a.dat"); string(got) != "reborn" {
+		t.Fatalf("a.dat = %q, want \"reborn\"", got)
 	}
-	var f File
 	if err := fsys.OpenFile(&f, "b.dat", ModeRead); err == nil {
 		t.Fatal("b.dat still exists after Remove")
 	}
 	if err := fsys.OpenFile(&f, "collision test file 07.dat", ModeRead); err == nil {
 		t.Fatal("collision test file 07.dat still exists after Remove")
 	}
-	if got := readAllFile(t, &fsys, "collision test file 08.dat"); string(got) != "collide" {
-		t.Fatalf("collision test file 08.dat = %q", got)
+	// collision 08 moved into subdir.
+	if err := fsys.OpenFile(&f, "collision test file 08.dat", ModeRead); err == nil {
+		t.Fatal("collision test file 08.dat still in root after Rename")
+	}
+	if got := readAllFile(t, &fsys, "subdir/collision east.dat"); string(got) != "collide" {
+		t.Fatalf("subdir/collision east.dat = %q", got)
+	}
+	// Directory tree checks through Stat.
+	var info FileInfo
+	if err := fsys.Stat("subdir", &info); err != nil || !info.IsDir() {
+		t.Fatalf("Stat subdir: IsDir=%v err=%v", info.IsDir(), err)
+	}
+	if err := fsys.Stat("subdir/deep.txt", &info); err != nil || info.IsDir() || info.Size() != 9 {
+		t.Fatalf("Stat subdir/deep.txt: IsDir=%v Size=%d err=%v", info.IsDir(), info.Size(), err)
+	}
+	if err := fsys.Stat("subdir/nested", &info); err == nil {
+		t.Fatal("subdir/nested still exists after directory Rename")
+	}
+	if got := readAllFile(t, &fsys, "nested2/leaf.txt"); string(got) != "leaf" {
+		t.Fatalf("nested2/leaf.txt = %q", got)
+	}
+	if got := readAllFile(t, &fsys, "nested2/after.txt"); string(got) != "moved dir works" {
+		t.Fatalf("nested2/after.txt = %q", got)
+	}
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("verify Unmount: %v", err)
 	}
 }
 
@@ -331,8 +456,8 @@ func TestGoldenTortureFAT12(t *testing.T) {
 		t.Fatalf("fstype = %d, want FAT12", fsys.fstype)
 	}
 	tortureScriptSmall(t, &fsys)
-	if err := fsys.Sync(); err != nil {
-		t.Fatalf("fs.Sync: %v", err)
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("fs.Unmount: %v", err)
 	}
 	spotCheckSmall(t, dev)
 	compareGolden(t, dev, "golden-torture12.img")
@@ -348,8 +473,8 @@ func TestGoldenTortureFAT16(t *testing.T) {
 		t.Fatalf("fstype = %d, want FAT16", fsys.fstype)
 	}
 	tortureScriptSmall(t, &fsys)
-	if err := fsys.Sync(); err != nil {
-		t.Fatalf("fs.Sync: %v", err)
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("fs.Unmount: %v", err)
 	}
 	spotCheckSmall(t, dev)
 	compareGolden(t, dev, "golden-torture16.img")
@@ -427,28 +552,110 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	// S9: big2.dat = 200000 bytes (tag 5) wraps into the freed chain.
 	createPat(t, &fsys, "big2.dat", 5, 200000)
 
-	if err := fsys.Sync(); err != nil {
-		t.Fatalf("fs.Sync: %v", err)
+	// S10: logs directory with 24 LFN files: the sub-directory table is a
+	// 512B-cluster chain that stretches repeatedly (24 files x 4 entries
+	// = 96 entries = 6 clusters).
+	if err := fsys.Mkdir("logs"); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	for i := 0; i < 24; i++ {
+		writeStr(t, &fsys, fmt.Sprintf("logs/log entry number %03d.txt", i), fmt.Sprintf("entry %03d", i))
+	}
+
+	// S11: positional writes on big2.dat: 4000 bytes at 123456 (tag 6)
+	// inside the file and 2000 bytes at EOF 200000 (tag 7), extending it
+	// to 202000.
+	if err := fsys.OpenFile(&f, "big2.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open big2.dat writeat: %v", err)
+	}
+	writeAtPat(t, &f, 6, 123456, 4000)
+	writeAtPat(t, &f, 7, 200000, 2000)
+	if f.Size() != 202000 {
+		t.Fatalf("big2.dat Size() = %d, want 202000", f.Size())
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close big2.dat writeat: %v", err)
+	}
+
+	// S12: truncate big2.dat 202000 -> 150001 (misaligned; frees a long
+	// chain tail).
+	if err := fsys.OpenFile(&f, "big2.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open big2.dat trunc: %v", err)
+	}
+	if err := f.Truncate(150001); err != nil {
+		t.Fatalf("truncate big2.dat: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close big2.dat trunc: %v", err)
+	}
+
+	// S13: move big.dat into the stretched logs directory.
+	if err := fsys.Rename("big.dat", "logs/big.dat"); err != nil {
+		t.Fatalf("move big.dat: %v", err)
+	}
+
+	// S14: move a sub-directory of logs to the root: its .. entry changes
+	// from the logs cluster to 0 (root). Then create a file through the
+	// moved path.
+	if err := fsys.Mkdir("logs/inner"); err != nil {
+		t.Fatalf("mkdir logs/inner: %v", err)
+	}
+	if err := fsys.Rename("logs/inner", "inner"); err != nil {
+		t.Fatalf("move inner: %v", err)
+	}
+	writeStr(t, &fsys, "inner/done.txt", "ok")
+
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("fs.Unmount: %v", err)
 	}
 
 	// Spot-check via read API before the byte-level comparison.
 	if err := fsys.Mount(dev, 512, ModeRead); err != nil {
 		t.Fatalf("verify re-mount: %v", err)
 	}
-	got := readAllFile(t, &fsys, "big.dat")
+	if err := fsys.OpenFile(&f, "big.dat", ModeRead); err == nil {
+		t.Fatal("big.dat still in root after Rename")
+	}
+	got := readAllFile(t, &fsys, "logs/big.dat")
 	if len(got) != 150000 {
-		t.Fatalf("big.dat size = %d, want 150000", len(got))
+		t.Fatalf("logs/big.dat size = %d, want 150000", len(got))
 	}
 	for i := 0; i < 8000; i++ {
 		if got[99991+i] != pat(3, i) {
-			t.Fatalf("big.dat[%d] tag-3 mismatch", 99991+i)
+			t.Fatalf("logs/big.dat[%d] tag-3 mismatch", 99991+i)
 		}
 	}
-	if got := readAllFile(t, &fsys, "big2.dat"); len(got) != 200000 || got[199999] != pat(5, 199999) {
-		t.Fatalf("big2.dat content mismatch (len %d)", len(got))
+	// big2.dat: tag 5 base, tag-6 overwrite at 123456, extension truncated
+	// away at 150001.
+	if err := fsys.OpenFile(&f, "big2.dat", ModeRead); err != nil {
+		t.Fatalf("open big2.dat: %v", err)
+	}
+	if f.Size() != 150001 {
+		t.Fatalf("big2.dat Size() = %d, want 150001", f.Size())
+	}
+	checkPatAt(t, &f, "big2.dat", 6, 123456, 4000, 0)
+	checkPatAt(t, &f, "big2.dat", 5, 150000, 1, 150000)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close big2.dat: %v", err)
 	}
 	if err := fsys.OpenFile(&f, "huge.dat", ModeRead); err == nil {
 		t.Fatal("huge.dat still exists after Remove")
+	}
+	var info FileInfo
+	if err := fsys.Stat("inner", &info); err != nil || !info.IsDir() {
+		t.Fatalf("Stat inner: IsDir=%v err=%v", info.IsDir(), err)
+	}
+	if err := fsys.Stat("logs/inner", &info); err == nil {
+		t.Fatal("logs/inner still exists after directory Rename")
+	}
+	if got := readAllFile(t, &fsys, "inner/done.txt"); string(got) != "ok" {
+		t.Fatalf("inner/done.txt = %q", got)
+	}
+	if got := readAllFile(t, &fsys, "logs/log entry number 013.txt"); string(got) != "entry 013" {
+		t.Fatalf("log entry 013 = %q", got)
+	}
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("verify Unmount: %v", err)
 	}
 
 	compareGolden(t, dev, "golden-torture32.img")

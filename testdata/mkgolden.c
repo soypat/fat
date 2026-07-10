@@ -128,6 +128,23 @@ static void append_pat(const char* name, int tag, int start, int n) {
     check(f_close(&fil), name);
 }
 
+/* write_at_pat mirrors the Go side's File.WriteAt: seek to off and issue a
+   single f_write of n patterned bytes (pattern index starting at 0). The
+   single call matters: the split between direct sector writes and the file
+   cache determines the undefined garbage bytes that land beyond EOF when the
+   write extends the file, so it must match the Go call chunking exactly. */
+static void write_at_pat(FIL* f, int tag, FSIZE_t off, int n) {
+    static uint8_t buf[8192];
+    UINT bw;
+    if (n > (int)sizeof(buf)) { fprintf(stderr, "write_at_pat: n too big\n"); exit(1); }
+    for (int j = 0; j < n; j++) buf[j] = pat(tag, j);
+    check(f_lseek(f, off), "write_at_pat seek");
+    if (f_write(f, buf, n, &bw) != FR_OK || bw != (UINT)n) {
+        fprintf(stderr, "write_at_pat failed\n");
+        exit(1);
+    }
+}
+
 static void write_str(const char* name, const char* content) {
     UINT bw;
     check(f_open(&fil, name, FA_CREATE_ALWAYS | FA_WRITE), name);
@@ -237,6 +254,48 @@ static void script_small(void) {
 
     /* S15: delete an LFN entry block in the middle of the directory. */
     check(f_unlink("collision test file 07.dat"), "unlink collision 07");
+
+    /* S16: sub-directories: subdir and nested one inside it. */
+    check(f_mkdir("subdir"), "mkdir subdir");
+    check(f_mkdir("subdir/nested"), "mkdir subdir/nested");
+
+    /* S17: files inside the new directories. */
+    write_str("subdir/deep.txt", "deep blue");
+    write_str("subdir/nested/leaf.txt", "leaf");
+
+    /* S18: positional writes on c.dat: 1500 bytes at 2000 (tag 9) inside
+       the file and 1000 bytes at 44000 (tag 10) past EOF 43000, extending
+       the file to 45000. The Go side uses WriteAt. */
+    check(f_open(&fil, "c.dat", FA_READ | FA_WRITE), "open c.dat writeat");
+    write_at_pat(&fil, 9, 2000, 1500);
+    check(f_lseek(&fil, 0), "restore c.dat fptr");
+    write_at_pat(&fil, 10, 44000, 1000);
+    check(f_lseek(&fil, 0), "restore c.dat fptr");
+    check(f_close(&fil), "close c.dat writeat");
+
+    /* S19: truncation: c.dat 45000 -> 20000 (drops chain tail), a.dat -> 0
+       (removes whole chain) then rewrite as "reborn". The Go side uses
+       Truncate and WriteString. */
+    check(f_open(&fil, "c.dat", FA_READ | FA_WRITE), "open c.dat trunc");
+    check(f_lseek(&fil, 20000), "seek c.dat 20000");
+    check(f_truncate(&fil), "truncate c.dat");
+    check(f_close(&fil), "close c.dat trunc");
+    check(f_open(&fil, "a.dat", FA_READ | FA_WRITE), "open a.dat trunc");
+    check(f_truncate(&fil), "truncate a.dat 0");
+    UINT bw;
+    check(f_write(&fil, "reborn", 6, &bw), "rewrite a.dat");
+    check(f_close(&fil), "close a.dat trunc");
+
+    /* S20: rename within the root directory. */
+    check(f_rename("c.dat", "cc.dat"), "rename c.dat");
+
+    /* S21: move an LFN file into a sub-directory. */
+    check(f_rename("collision test file 08.dat", "subdir/collision east.dat"), "move collision 08");
+
+    /* S22: move a directory to the root: its .. entry must be rewritten.
+       Then create a file through the moved path. */
+    check(f_rename("subdir/nested", "nested2"), "move nested");
+    write_str("nested2/after.txt", "moved dir works");
 }
 
 /* ---------------- FAT32 torture script ----------------
@@ -292,6 +351,44 @@ static void script32(void) {
 
     /* S9: big2.dat = 200000 bytes (tag 5) wraps into the freed chain. */
     create_pat("big2.dat", 5, 200000);
+
+    /* S10: logs directory with 24 LFN files: the sub-directory table is a
+       512B-cluster chain that stretches repeatedly (24 files x 4 entries
+       = 96 entries = 6 clusters). */
+    check(f_mkdir("logs"), "mkdir logs");
+    for (i = 0; i < 24; i++) {
+        snprintf(name, sizeof(name), "logs/log entry number %03d.txt", i);
+        char content[32];
+        snprintf(content, sizeof(content), "entry %03d", i);
+        write_str(name, content);
+    }
+
+    /* S11: positional writes on big2.dat: 4000 bytes at 123456 (tag 6)
+       inside the file and 2000 bytes at EOF 200000 (tag 7), extending it
+       to 202000. The Go side uses WriteAt. */
+    check(f_open(&fil, "big2.dat", FA_READ | FA_WRITE), "open big2.dat writeat");
+    write_at_pat(&fil, 6, 123456, 4000);
+    check(f_lseek(&fil, 0), "restore big2.dat fptr");
+    write_at_pat(&fil, 7, 200000, 2000);
+    check(f_lseek(&fil, 0), "restore big2.dat fptr");
+    check(f_close(&fil), "close big2.dat writeat");
+
+    /* S12: truncate big2.dat 202000 -> 150001 (misaligned; frees a long
+       chain tail). The Go side uses Truncate. */
+    check(f_open(&fil, "big2.dat", FA_READ | FA_WRITE), "open big2.dat trunc");
+    check(f_lseek(&fil, 150001), "seek big2.dat 150001");
+    check(f_truncate(&fil), "truncate big2.dat");
+    check(f_close(&fil), "close big2.dat trunc");
+
+    /* S13: move big.dat into the stretched logs directory. */
+    check(f_rename("big.dat", "logs/big.dat"), "move big.dat");
+
+    /* S14: move a sub-directory of logs to the root: its .. entry changes
+       from the logs cluster to 0 (root). Then create a file through the
+       moved path. */
+    check(f_mkdir("logs/inner"), "mkdir logs/inner");
+    check(f_rename("logs/inner", "inner"), "move inner");
+    write_str("inner/done.txt", "ok");
 }
 
 int main(int argc, char** argv) {
