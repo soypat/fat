@@ -278,10 +278,10 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 	fno.fname[0] = 0 // Invalidate.
 	if dp.sect == 0 {
 		return // End of directory reached.
-	} else if fsys.fstype == fstypeExFAT {
+	} else if fsys.isExfat() {
+		dp.get_fileinfo_exfat(fno)
 		return
 	}
-	// TODO(soypat): implement exFAT here.
 	var si, di int
 	var wc uint16
 	if dp.blk_ofs != badLBA {

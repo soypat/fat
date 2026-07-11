@@ -455,6 +455,14 @@ func skipIfNoLFN(t *testing.T) {
 	}
 }
 
+// skipIfNoExFAT skips exFAT tests on fat_noexfat/fat_nolfn builds.
+func skipIfNoExFAT(t *testing.T) {
+	t.Helper()
+	if !exfatEnabled {
+		t.Skip("test requires exFAT support (built with fat_noexfat or fat_nolfn)")
+	}
+}
+
 func TestGoldenTortureFAT12(t *testing.T) {
 	skipIfNoLFN(t)
 	dev := goldenDevice(t, "golden-fmt12.img")

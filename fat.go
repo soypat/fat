@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"math/bits"
-	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -47,7 +46,7 @@ type FS struct {
 	ssize  uint16    // Sector size in bytes.
 	lfnbuf lfnbuffer // Long file name working buffer. Empty with fat_nolfn build tag.
 
-	dirbuf    [608]byte // Directory entry block scratchpad for exFAT. (255+44)/15*32 = 608.
+	dirbuf    dirbuffer // Directory entry block scratchpad for exFAT. Empty with fat_noexfat build tag.
 	device    BlockDevice
 	last_clst uint32 // Last allocated clusters.
 	free_clst uint32 // Number of free clusters.
@@ -321,6 +320,10 @@ func (obj *objid) validate() fileResult {
 	return frOK
 }
 
+func (fsys *FS) isExfat() bool {
+	return exfatEnabled && fsys.fstype == fstypeExFAT
+}
+
 func (fsys *FS) f_sync(fp *File) (fr fileResult) {
 	fsys.trace("f_sync")
 	if fp.flag&faMODIFIED == 0 {
@@ -473,8 +476,6 @@ outerLoop:
 func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 	if dp == nil {
 		return frInvalidObject
-	} else if fs.fstype == fstypeExFAT {
-		return frUnsupported
 	}
 
 	dp.obj.fs = fs
@@ -490,8 +491,12 @@ func (fs *FS) f_opendir(dp *dir, path string) (fr fileResult) {
 
 	if dp.fn[nsFLAG]&nsNONAME == 0 {
 		if dp.obj.attr&amDIR != 0 {
-			// TODO(soypat): implement exFAT here.
-			dp.obj.sclust = fs.ld_clust(dp.dir) // Get object allocation info.
+			// Get object allocation info.
+			if fs.isExfat() {
+				dp.obj.init_alloc_info_sdir(dp)
+			} else {
+				dp.obj.sclust = fs.ld_clust(dp.dir)
+			}
 		} else {
 			fr = frNoPath
 		}
@@ -514,8 +519,6 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fsys.trace("f_open", slog.String("name", name), slog.Uint64("mode", uint64(mode)))
 	if fp == nil {
 		return frInvalidObject
-	} else if fsys.fstype == fstypeExFAT {
-		return frUnsupported
 	} else if fsys.perm == 0 {
 		return frDenied
 	}
@@ -546,7 +549,9 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 		}
 		if res == frOK && (mode&faCreateAlways) != 0 {
 			// Truncate file if overwrite mode.
-			// TODO(soypat): implement exFAT here.
+			if fsys.fstype == fstypeExFAT {
+				return frUnsupported // TODO(soypat): exFAT truncate-on-create (Stage 5).
+			}
 			tm := fsys.time()
 			binary.LittleEndian.PutUint32(dj.dir[dirCrtTimeOff:], tm)
 			binary.LittleEndian.PutUint32(dj.dir[dirModTimeOff:], tm)
@@ -587,10 +592,14 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fp.dir_sect = fsys.winsect
 	fp.dir_ptr = dj.dir
 
-	// TODO(soypat): implement exFAT here.
-
-	fp.obj.sclust = fsys.ld_clust(dj.dir)
-	fp.obj.objsize = int64(binary.LittleEndian.Uint32(dj.dir[dirFileSizeOff:]))
+	// Get object allocation info.
+	if fsys.isExfat() {
+		fp.obj.fs = fsys
+		fp.obj.init_alloc_info_sdir(&dj)
+	} else {
+		fp.obj.sclust = fsys.ld_clust(dj.dir)
+		fp.obj.objsize = int64(binary.LittleEndian.Uint32(dj.dir[dirFileSizeOff:]))
+	}
 
 	fp.obj.fs = fsys
 	fp.obj.id = fsys.id
@@ -657,8 +666,6 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 		return res
 	} else if fp.err != frOK {
 		return fp.err
-	} else if fsys.fstype == fstypeExFAT {
-		return frUnsupported
 	}
 	ss := int64(fsys.ssize)
 
@@ -739,7 +746,7 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 	}
 
 	// Normal seek.
-	if ofs >= 0x1_0000_0000 {
+	if fsys.fstype != fstypeExFAT && ofs >= 0x1_0000_0000 {
 		ofs = 0xFFFF_FFFF // Clip at 4 GiB - 1 for FATxx.
 	}
 	if ofs > fp.obj.objsize && fp.flag&faWrite == 0 {
@@ -778,6 +785,11 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 				ofs -= bcs
 				fp.fptr += bcs
 				if fp.flag&faWrite != 0 {
+					if fsys.isExfat() && fp.fptr > fp.obj.objsize {
+						// No-FAT-chain object needs correct objsize to generate FAT values.
+						fp.obj.objsize = fp.fptr
+						fp.flag |= faMODIFIED
+					}
 					// Follow chain with forced stretch when in write mode.
 					clst = fp.obj.create_chain(clst)
 					if clst == 0 {
@@ -920,9 +932,6 @@ func (fsys *FS) f_unlink(path string) (res fileResult) {
 // (root) directory since it has no directory entry of its own.
 func (fsys *FS) f_stat(path string, fno *FileInfo) (res fileResult) {
 	fsys.trace("f_stat", slog.String("path", path))
-	if fsys.fstype == fstypeExFAT {
-		return frUnsupported
-	}
 	var dj dir
 	dj.obj.fs = fsys
 	res = dj.follow_path(path)
@@ -1105,9 +1114,6 @@ func (dp *dir) dir_remove() (res fileResult) {
 func (dp *dir) f_readdir(fno *FileInfo) fileResult {
 	fsys := dp.obj.fs
 	fsys.trace("dir:f_readdir")
-	if fsys.fstype == fstypeExFAT {
-		return frUnsupported
-	}
 	fr := dp.obj.validate()
 	if fr != frOK {
 		return fr
@@ -1136,8 +1142,8 @@ func (dp *dir) f_readdir(fno *FileInfo) fileResult {
 func (dp *dir) read(vol bool) (fr fileResult) {
 	fsys := dp.obj.fs
 	fsys.trace("dir:read", slog.Bool("vol", vol))
-	if fsys.fstype == fstypeExFAT {
-		return frUnsupported
+	if fsys.isExfat() {
+		return dp.read_exfat(vol)
 	}
 	var ord, sum byte
 	for dp.sect != 0 {
@@ -1191,7 +1197,11 @@ func (dp *dir) read(vol bool) (fr fileResult) {
 func (fsys *FS) sync() fileResult {
 	fsys.trace("fs:sync")
 	fr := fsys.sync_window()
-	if fr == frOK && fsys.fstype == fstypeFAT32 && fsys.fsi_flag == 1 {
+	if fr != frOK || fsys.fsi_flag != 1 {
+		return fr
+	}
+	fsys.fsi_flag = 0
+	if fsys.fstype == fstypeFAT32 {
 		// Create FSInfo structure.
 		fsys.window_clr()
 		binary.LittleEndian.PutUint16(fsys.win[bs55AA:], 0xAA55)
@@ -1201,7 +1211,19 @@ func (fsys *FS) sync() fileResult {
 		binary.LittleEndian.PutUint32(fsys.win[fsiNxt_Free:], fsys.last_clst)
 		fsys.winsect = fsys.volbase + 1
 		fsys.disk_write(fsys.win[:], fsys.winsect, 1) // Write backup copy.
-		fsys.fsi_flag = 0
+	} else if fsys.isExfat() {
+		// Update the PercInUse field in the VBR.
+		fsys.winsect = fsys.volbase
+		if fsys.disk_read(fsys.win[:], fsys.winsect, 1) == drOK {
+			var perc byte = 0xFF // Unknown.
+			if fsys.free_clst <= fsys.n_fatent-2 {
+				perc = byte(uint64(fsys.n_fatent-2-fsys.free_clst) * 100 / uint64(fsys.n_fatent-2))
+			}
+			if fsys.win[bpbPercInUseEx] != perc {
+				fsys.win[bpbPercInUseEx] = perc
+				fsys.disk_write(fsys.win[:], fsys.winsect, 1)
+			}
+		}
 	}
 	return fr
 }
@@ -1367,10 +1389,6 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	return frOK
 }
 
-func (fsys *FS) init_exfat() fileResult {
-	return frUnsupported // TODO(soypat): implement exFAT.
-}
-
 func (fsys *FS) disk_status() diskstatus {
 	return 0
 }
@@ -1476,8 +1494,9 @@ func (obj *objid) clusterstat(clst uint32) (val uint32) {
 	ss := uint32(fsys.ssize)
 	switch fsys.fstype {
 	default:
-		// TODO(soypat): implement exFAT.
 		return 1 // Not supported.
+	case fstypeExFAT:
+		return obj.clusterstat_exfat(clst)
 	case fstypeFAT12:
 		bc := clst + clst/2 // Byte offset of the entry.
 		if fsys.move_window(fsys.fatbase+lba(bc/ss)) != frOK {
@@ -1741,45 +1760,6 @@ func (fsys *FS) window_clr() {
 	fsys.win = [len(fsys.win)]byte{} // Effectively a memclear.
 }
 
-func (fs *FS) change_bitmap(clst, ncl uint32, bv bool) fileResult {
-	fs.trace("fs:change_bitmap", slog.Uint64("clst", uint64(clst)), slog.Uint64("ncl", uint64(ncl)), slog.Bool("bv", bv))
-	clst -= 2 // First bit corresponds to cluster #2.
-	clstDiv8 := clst / 8
-	sect := fs.bitbase + lba(fs.divSS(clstDiv8))
-	i := fs.modSS(clstDiv8)
-	var mask byte = 1 << (clst % 8)
-	for {
-		if fs.move_window(sect) != frOK {
-			return frDiskErr
-		}
-		sect++
-		for {
-			for {
-				if bv == (fs.win[i]&mask != 0) {
-					// Unexpected bit value.
-					return frIntErr
-				}
-				fs.win[i] ^= mask
-				fs.wflag = 1
-				ncl--
-				mask <<= 1
-				if ncl == 0 {
-					return frOK
-				} else if mask == 0 {
-					break
-				}
-			}
-			mask = 1
-			i++
-			if i == uint32(fs.ssize) {
-				break
-			}
-		}
-		i = 0
-		runtime.Gosched()
-	}
-}
-
 func chk_chr(str *byte, char byte) bool {
 	for *str != 0 && *str != char {
 		str = (*byte)(unsafe.Add(unsafe.Pointer(str), 1))
@@ -1949,8 +1929,6 @@ func (dp *dir) follow_path(path string) (fr fileResult) {
 	dp.obj.n_frag = 0 // Invalidate last fragment counter.
 	if fsys.fstype == fstypeUnknown {
 		return frNoFilesystem // Not mounted.
-	} else if fsys.fstype == fstypeExFAT {
-		return frUnsupported // TODO(soypat): implement exFAT.
 	}
 	if len(path) == 0 || isTermLFN(path[0]) {
 		// Received origin directory.
@@ -1983,12 +1961,8 @@ func (dp *dir) follow_path(path string) (fr fileResult) {
 			break
 		}
 		// Open next directory:
-		if fsys.fstype == fstypeExFAT {
-			// Save containing directory for next dir.
-			dp.obj.c_scl = dp.obj.sclust
-			dp.obj.c_size = uint32(dp.obj.objsize&0xFFFFFF00) | uint32(dp.obj.stat)
-			dp.obj.c_ofs = dp.blk_ofs
-			dp.obj.init_alloc_info()
+		if fsys.isExfat() {
+			dp.obj.init_alloc_info_sdir(dp)
 		} else {
 			off := fsys.modSS(dp.dptr)
 			dp.obj.sclust = fsys.ld_clust(fsys.win[off:])
@@ -2014,8 +1988,8 @@ func (dp *dir) find() fileResult {
 	if fr != frOK {
 		return fr
 	}
-	if fsys.fstype == fstypeExFAT {
-		return frUnsupported // TODO(soypat): implement exFAT.
+	if exfatEnabled && fsys.fstype == fstypeExFAT {
+		return dp.find_exfat()
 	}
 	var ord, sum byte = 0xff, 0xff
 	dp.blk_ofs = badLBA // Reset LFN sequence.
@@ -2349,12 +2323,14 @@ removeloop:
 	return frOK
 }
 
-func (obj *objid) init_alloc_info() {
-	fsys := obj.fs
-	obj.sclust = binary.LittleEndian.Uint32(fsys.dirbuf[xdirFstClus:])
-	obj.objsize = int64(binary.LittleEndian.Uint64(fsys.dirbuf[xdirFileSize:]))
-	obj.stat = fsys.dirbuf[xdirGenFlags] & 2
-	obj.n_frag = 0
+// init_alloc_info_sdir saves the containing directory info from sdir into
+// obj and loads the object allocation info from the entry set in fsys.dirbuf.
+// Mirrors C init_alloc_info(obj, sdir) with a non-null sdir (exFAT only).
+func (obj *objid) init_alloc_info_sdir(sdir *dir) {
+	obj.c_scl = sdir.obj.sclust
+	obj.c_size = uint32(sdir.obj.objsize&0xFFFFFF00) | uint32(sdir.obj.stat)
+	obj.c_ofs = sdir.blk_ofs
+	obj.init_alloc_info()
 }
 
 // blkIdxer is a helper for calculating block indexes and offsets.

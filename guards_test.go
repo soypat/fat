@@ -185,8 +185,10 @@ func TestGPTUnsupported(t *testing.T) {
 	}
 }
 
-// TestExFATUnsupported verifies an exFAT VBR is recognized and rejected.
-func TestExFATUnsupported(t *testing.T) {
+// TestExFATBadVBR verifies an exFAT VBR is recognized and dispatched to the
+// exFAT mount path: with exFAT support the empty BPB is rejected as an
+// invalid filesystem, without it the mount reports unsupported.
+func TestExFATBadVBR(t *testing.T) {
 	buf := make([]byte, 64*512)
 	copy(buf, "\xEB\x76\x90EXFAT   ")
 	buf[510] = 0x55
@@ -195,8 +197,12 @@ func TestExFATUnsupported(t *testing.T) {
 	dev := &BlockByteSlice{blk: blk, buf: buf}
 	var fsys FS
 	err := fsys.Mount(dev, 512, ModeRW)
-	if !errors.Is(err, frUnsupported) {
-		t.Fatalf("exFAT mount error = %v, want unsupported", err)
+	want := error(frNoFilesystem)
+	if !exfatEnabled {
+		want = frUnsupported
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("exFAT mount error = %v, want %v", err, want)
 	}
 }
 

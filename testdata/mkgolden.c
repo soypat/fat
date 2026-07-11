@@ -1,6 +1,6 @@
 // mkgolden.c — deterministic FatFs torture-image generator.
 //
-// Produces six images in the given output directory:
+// Produces eight images in the given output directory:
 //
 //   golden-fmt12.img      FAT12 4MiB volume (au 4096) right after f_mkfs (baseline)
 //   golden-torture12.img  same volume after the small torture script
@@ -8,6 +8,9 @@
 //   golden-torture16.img  same volume after the small torture script
 //   golden-fmt32.img      FAT32 64MiB volume (au 512) right after f_mkfs (baseline)
 //   golden-torture32.img  same volume after the FAT32 torture script
+//   golden-fmtex.img      exFAT 64MiB volume (au 512) right after f_mkfs (baseline)
+//   golden-tortureex.img  same volume after the FAT32 torture script plus
+//                         the exFAT-specific extra script
 //
 // golden_torture_test.go loads a baseline image (the Go port has no mkfs),
 // replays the exact same numbered script through the exported Go API and
@@ -18,7 +21,8 @@
 // and reads return exactly what was written.
 //
 // Required ffconf.h settings (already applied to local/ff16/source/ffconf.h):
-//   FF_USE_MKFS 1, FF_USE_LFN 1, FF_LFN_UNICODE 2 (UTF-8), FF_CODE_PAGE 437
+//   FF_USE_MKFS 1, FF_USE_LFN 1, FF_LFN_UNICODE 2 (UTF-8), FF_CODE_PAGE 437,
+//   FF_FS_EXFAT 1
 //
 // get_fattime() returns 0 to match the Go port's FS.time().
 //
@@ -391,6 +395,56 @@ static void script32(void) {
     write_str("inner/done.txt", "ok");
 }
 
+/* ---------------- exFAT extra torture script ----------------
+   Runs after script32() on the exFAT volume. Steps must stay in lockstep
+   with TestGoldenTortureExFAT. Exercises exFAT-specific machinery: the
+   NoFatChain contiguous state (obj stat 2), its transition to a
+   materialized FAT chain on fragmentation (fill_first_frag/fill_last_frag),
+   bitmap hole reuse, name-hash recompute on rename and dot-entry-free
+   directories. Cluster size is 512B. */
+static void script_exfat(void) {
+    /* X1: cont.dat = 20000 bytes (tag 11): contiguous, NoFatChain.
+       block.dat = 10000 bytes (tag 12) allocated right after it. */
+    create_pat("cont.dat", 11, 20000);
+    create_pat("block.dat", 12, 10000);
+
+    /* X2: append 20000 bytes to cont.dat: the next free cluster is beyond
+       block.dat so the file fragments and its FAT chain must be
+       materialized (stat 2 -> 3 -> chain on FAT). */
+    append_pat("cont.dat", 11, 20000, 20000);
+
+    /* X3: truncate cont.dat 40000 -> 5000: drops the fragmented tail;
+       the remaining head is contiguous again. */
+    check(f_open(&fil, "cont.dat", FA_READ | FA_WRITE), "open cont.dat trunc");
+    check(f_lseek(&fil, 5000), "seek cont.dat 5000");
+    check(f_truncate(&fil), "truncate cont.dat");
+    check(f_close(&fil), "close cont.dat trunc");
+
+    /* X4: mid-file overwrite of block.dat (misaligned, stays contiguous:
+       NoFatChain must survive an in-place rewrite). */
+    check(f_open(&fil, "block.dat", FA_READ | FA_WRITE), "open block.dat");
+    check(f_lseek(&fil, 1234), "seek block.dat 1234");
+    write_pat(&fil, 13, 0, 4000);
+    check(f_close(&fil), "close block.dat");
+
+    /* X5: rename with a unicode name: exFAT name hash recompute. */
+    check(f_rename("cont.dat", "conti\xc3\xb1uaci\xc3\xb3n.dat"), "rename cont.dat"); /* contiñuación.dat */
+
+    /* X6: deep directory nesting (exFAT directories have no dot entries). */
+    check(f_mkdir("deep"), "mkdir deep");
+    check(f_mkdir("deep/deeper"), "mkdir deep/deeper");
+    check(f_mkdir("deep/deeper/deepest"), "mkdir deep/deeper/deepest");
+    write_str("deep/deeper/deepest/bottom.txt", "made it");
+
+    /* X7: delete-and-reuse: free block.dat's clusters then thread
+       refill.dat = 15000 bytes (tag 14) through the bitmap hole. */
+    check(f_unlink("block.dat"), "unlink block.dat");
+    create_pat("refill.dat", 14, 15000);
+
+    /* X8: move the renamed unicode file into the deep directory. */
+    check(f_rename("conti\xc3\xb1uaci\xc3\xb3n.dat", "deep/conti\xc3\xb1uaci\xc3\xb3n.dat"), "move unicode");
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <output-dir>\n", argv[0]);
@@ -459,6 +513,29 @@ int main(int argc, char** argv) {
     check(f_mount(NULL, "", 0), "unmount FAT32");
     dump(out, "golden-torture32.img", (size_t)NUM_SECTORS32 * SECTOR_SIZE);
     free(g_mem);
+
+#if FF_FS_EXFAT
+    /* ---- exFAT pair (au 512 -> ~130k clusters) ---- */
+    g_sectors = NUM_SECTORS32;
+    g_mem = calloc(NUM_SECTORS32, SECTOR_SIZE);
+    if (!g_mem) { perror("calloc"); return 1; }
+    memset(&opt, 0, sizeof(opt));
+    opt.fmt = FM_EXFAT | FM_SFD;
+    opt.n_fat = 1;
+    opt.au_size = 512;
+    check(f_mkfs("", &opt, work, sizeof(work)), "f_mkfs exFAT");
+    dump(out, "golden-fmtex.img", (size_t)NUM_SECTORS32 * SECTOR_SIZE);
+    check(f_mount(&fs, "", 1), "f_mount exFAT");
+    if (fs.fs_type != FS_EXFAT) {
+        fprintf(stderr, "expected exFAT, got fs_type=%d\n", fs.fs_type);
+        return 1;
+    }
+    script32();
+    script_exfat();
+    check(f_mount(NULL, "", 0), "unmount exFAT");
+    dump(out, "golden-tortureex.img", (size_t)NUM_SECTORS32 * SECTOR_SIZE);
+    free(g_mem);
+#endif
 
     return 0;
 }
