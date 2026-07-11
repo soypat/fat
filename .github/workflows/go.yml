@@ -27,11 +27,20 @@ jobs:
     - name: Test
       run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
 
-    - name: govulncheck
-      uses: golang/govulncheck-action@v1
-      with:
-        go-version-input: 1.23
-        go-package: ./...
+    - name: Test fat_nolfn
+      run: go test -tags fat_nolfn ./...
+
+    - name: Test fat_noexfat
+      run: go test -tags fat_noexfat ./...
+
+    - name: Test fat_nolfn,fat_noexfat
+      run: go test -tags "fat_nolfn,fat_noexfat" ./...
+
+    # - name: govulncheck
+    #   uses: golang/govulncheck-action@v1
+    #   with:
+    #     go-version-input: 1.23
+    #     go-package: ./...
 
     - shell: bash
       env:

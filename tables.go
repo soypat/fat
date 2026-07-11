@@ -187,7 +187,17 @@ const (
 	xdirValidFileSize = 40 // exFAT: Valid file size (QWORD)
 	xdirFstClus       = 52 // exFAT: First cluster of the file data (DWORD)
 	xdirFileSize      = 56 // exFAT: File/Directory size (QWORD)
+)
 
+// exFAT directory entry types (XDIR_Type values).
+const (
+	etBITMAP   = 0x81 // Allocation bitmap
+	etUPCASE   = 0x82 // Up-case table
+	etVLABEL   = 0x83 // Volume label
+	etFILEDIR  = 0x85 // File/directory entry
+	etSTREAM   = 0xC0 // Stream extension
+	etFILENAME = 0xC1 // File name entry
+	etMaskUsed = 0x80 // InUse bit of the entry type
 )
 
 // CT*: SBCS up-case tables.
