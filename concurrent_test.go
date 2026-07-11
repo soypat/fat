@@ -13,7 +13,22 @@ import (
 // serialized results is checked per goroutine.
 func TestConcurrentMixedOps(t *testing.T) {
 	fsys, _ := initTestFATWithLogger(32000, nil)
+	runConcurrentMixedOps(t, fsys)
+}
 
+// TestConcurrentMixedOpsExFAT runs the same scenario on an exFAT volume:
+// the shared FS.dirbuf entry-set scratchpad must be protected by the
+// single FS lock exactly like the FAT window.
+func TestConcurrentMixedOpsExFAT(t *testing.T) {
+	skipIfNoExFAT(t)
+	fsys, _, err := initTestExFAT(32000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runConcurrentMixedOps(t, fsys)
+}
+
+func runConcurrentMixedOps(t *testing.T, fsys *FS) {
 	shared := []byte("shared file contents for concurrent ReadAt")
 	var sharedFp File
 	if err := fsys.OpenFile(&sharedFp, "shared.bin", ModeWrite|ModeCreateAlways); err != nil {

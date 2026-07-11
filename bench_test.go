@@ -22,6 +22,20 @@ func mountBench(b *testing.B) *FS {
 	return &fs
 }
 
+// mountBenchExFAT formats and mounts an in-memory exFAT volume, skipping
+// the benchmark on fat_noexfat/fat_nolfn builds.
+func mountBenchExFAT(b *testing.B) *FS {
+	b.Helper()
+	if !exfatEnabled {
+		b.Skip("exFAT support compiled out")
+	}
+	fsys, _, err := initTestExFAT(32000)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return fsys
+}
+
 // benchFile creates a file of n bytes and returns its name.
 func benchFile(b *testing.B, fsys *FS, name string, n int) {
 	b.Helper()
@@ -272,6 +286,135 @@ func BenchmarkTruncate(b *testing.B) {
 	}
 }
 
+// exFAT variants of the benchmarks above: entry-set loading, name-hash
+// lookup, NoFatChain cluster generation, bitmap allocation and entry-set
+// stores must stay alloc-free too.
+
+func BenchmarkExFATOpenClose(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	benchFile(b, fsys, "rootfile", 512)
+	var fp File
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fsys.OpenFile(&fp, "rootfile", ModeRead); err != nil {
+			b.Fatal(err)
+		}
+		if err := fp.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkExFATReadSequential(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeRead); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	buf := make([]byte, 1024)
+	b.SetBytes(int64(len(buf)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		n, err := fp.Read(buf)
+		if err == io.EOF {
+			if _, err := fp.Seek(0, io.SeekStart); err != nil {
+				b.Fatal(err)
+			}
+			continue
+		}
+		if err != nil || n == 0 {
+			b.Fatal(n, err)
+		}
+	}
+}
+
+func BenchmarkExFATWriteRewrite(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	buf := make([]byte, 4096)
+	b.SetBytes(int64(len(buf)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fsys.OpenFile(&fp, "bench.bin", ModeRW); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := fp.Write(buf); err != nil {
+			b.Fatal(err)
+		}
+		if err := fp.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkExFATCreateRemove(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	var fp File
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fsys.OpenFile(&fp, "tmp.bin", ModeWrite|ModeCreateAlways); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := fp.WriteString("x"); err != nil {
+			b.Fatal(err)
+		}
+		if err := fp.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if err := fsys.Remove("tmp.bin"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkExFATDirList(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	for i := 0; i < 8; i++ {
+		benchFile(b, fsys, "rootdir/file"+string(rune('0'+i)), 512)
+	}
+	var dp Dir
+	if err := fsys.OpenDir(&dp, "rootdir"); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := dp.ForEachFile(func(info *FileInfo) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkExFATTruncate(b *testing.B) {
+	fsys := mountBenchExFAT(b)
+	benchFile(b, fsys, "bench.bin", 8192)
+	var fp File
+	if err := fsys.OpenFile(&fp, "bench.bin", ModeRW); err != nil {
+		b.Fatal(err)
+	}
+	defer fp.Close()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Shrink one cluster then grow back: exercises remove_chain with
+		// bitmap frees and the chain-stretching seek every iteration.
+		if err := fp.Truncate(4096); err != nil {
+			b.Fatal(err)
+		}
+		if err := fp.Truncate(8192); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // TestBenchmarksDoNotAllocate pins the 0 allocs/op guarantee in the
 // regular test suite so a regression fails `go test`, not just an eyeballed
 // benchmark run.
@@ -294,6 +437,12 @@ func TestBenchmarksDoNotAllocate(t *testing.T) {
 		{"WriteAt", BenchmarkWriteAt},
 		{"WriteString", BenchmarkWriteString},
 		{"Truncate", BenchmarkTruncate},
+		{"ExFATOpenClose", BenchmarkExFATOpenClose},
+		{"ExFATReadSequential", BenchmarkExFATReadSequential},
+		{"ExFATWriteRewrite", BenchmarkExFATWriteRewrite},
+		{"ExFATCreateRemove", BenchmarkExFATCreateRemove},
+		{"ExFATDirList", BenchmarkExFATDirList},
+		{"ExFATTruncate", BenchmarkExFATTruncate},
 	}
 	for _, bench := range benches {
 		res := testing.Benchmark(bench.fn)

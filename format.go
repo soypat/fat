@@ -35,7 +35,7 @@ func (f *Formatter) Format(bd BlockDevice, blocksize, fsSizeInBlocks int, cfg Fo
 	if cfg.Format == 0 {
 		cfg.Format = FormatFAT32
 	}
-	if blocksize <= 512 || fsSizeInBlocks <= 32 || bd == nil || cfg.Format != FormatFAT32 {
+	if blocksize < 512 || blocksize&(blocksize-1) != 0 || fsSizeInBlocks <= 32 || bd == nil {
 		return errors.New("invalid Format argument")
 	}
 	if len(f.window) < blocksize {
@@ -51,7 +51,7 @@ func (f *Formatter) Format(bd BlockDevice, blocksize, fsSizeInBlocks int, cfg Fo
 	case FormatFAT12, FormatFAT16, FormatFAT32:
 		return f.formatFAT(bd, blocksize, fsSizeInBlocks, cfg)
 	case FormatExFAT:
-		return frUnsupported
+		return f.formatExFAT(blocksize, fsSizeInBlocks, cfg)
 	default:
 		return frUnsupported
 	}
@@ -76,7 +76,7 @@ func (f *Formatter) formatFAT(bd BlockDevice, blocksize, fsSizeInBlocks int, cfg
 	// for {
 	// 	pau := sz
 	// }
-	return nil
+	return frUnsupported // TODO(soypat): FAT12/16/32 mkfs not implemented yet.
 }
 
 func (f *Formatter) move_window(addr lba) error {

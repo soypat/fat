@@ -3,6 +3,7 @@ package fat
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"math"
 	"time"
 	"unsafe"
@@ -456,6 +457,8 @@ func (dp *Dir) ForEachFile(callback func(*FileInfo) error) error {
 	}
 }
 
+var _ fs.FileInfo = (*FileInfo)(nil)
+
 // AlternateName returns the alternate name of the file.
 func (finfo *FileInfo) AlternateName() string {
 	return str(finfo.altname[:])
@@ -474,6 +477,25 @@ func (finfo *FileInfo) Size() int64 {
 // ModTime returns the modification time of the file.
 func (finfo *FileInfo) ModTime() time.Time {
 	return finfo.datetime.Time()
+}
+
+// Mode returns the file mode bits mapped from the FAT attributes: 0666, or
+// 0444 if the read-only attribute is set, with ModeDir|0111 added for
+// directories. FAT stores no owner/group, so the permission bits are synthetic.
+func (finfo *FileInfo) Mode() fs.FileMode {
+	m := fs.FileMode(0o666)
+	if finfo.fattrib&amRDO != 0 {
+		m = 0o444
+	}
+	if finfo.fattrib&amDIR != 0 {
+		m |= fs.ModeDir | 0o111
+	}
+	return m
+}
+
+// Sys returns the raw FAT attribute byte of the directory entry.
+func (finfo *FileInfo) Sys() any {
+	return finfo.fattrib
 }
 
 // IsDir returns true if the file is a directory.

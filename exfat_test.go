@@ -4,6 +4,245 @@ import (
 	"testing"
 )
 
+// initTestExFAT formats a fresh in-memory exFAT volume of numBlocks 512-byte
+// blocks (min 0x1000) with the Go formatter and mounts it read-write, with
+// /rootdir created to mirror the FAT test image layout. Callers must have
+// checked exfatEnabled.
+func initTestExFAT(numBlocks int) (*FS, *BlockByteSlice, error) {
+	blk, err := makeBlockIndexer(512)
+	if err != nil {
+		return nil, nil, err
+	}
+	dev := &BlockByteSlice{blk: blk, buf: make([]byte, numBlocks*512)}
+	var fmtr Formatter
+	err = fmtr.Format(dev, 512, numBlocks, FormatConfig{Format: FormatExFAT})
+	if err != nil {
+		return nil, nil, err
+	}
+	var fsys FS
+	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
+		return nil, nil, err
+	}
+	if err := fsys.Mkdir("rootdir"); err != nil {
+		return nil, nil, err
+	}
+	return &fsys, dev, nil
+}
+
+// TestGoldenTortureExFAT mirrors the exFAT pair in mkgolden.c: the FAT32
+// torture script (shared, 512B clusters) plus script_exfat() which exercises
+// exFAT-specific machinery — the NoFatChain contiguous state and its
+// transition to a materialized FAT chain on fragmentation, bitmap hole
+// reuse, name-hash recompute on rename and dot-entry-free directories.
+// The result must match the C-generated image byte for byte.
+func TestGoldenTortureExFAT(t *testing.T) {
+	skipIfNoExFAT(t)
+	dev := goldenDevice(t, "golden-fmtex.img")
+	var fsys FS
+	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	if fsys.fstype != fstypeExFAT {
+		t.Fatalf("fstype = %d, want exFAT", fsys.fstype)
+	}
+	tortureScript32(t, &fsys)
+	tortureScriptExFAT(t, &fsys)
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("fs.Unmount: %v", err)
+	}
+	spotCheck32(t, dev)
+	spotCheckExFAT(t, dev)
+	compareGolden(t, dev, "golden-tortureex.img")
+}
+
+// tortureScriptExFAT mirrors script_exfat() in mkgolden.c; steps must stay
+// in lockstep. Runs after tortureScript32 on the exFAT volume.
+func tortureScriptExFAT(t *testing.T, fsys *FS) {
+	// X1: cont.dat = 20000 bytes (tag 11): contiguous, NoFatChain.
+	// block.dat = 10000 bytes (tag 12) allocated right after it.
+	createPat(t, fsys, "cont.dat", 11, 20000)
+	createPat(t, fsys, "block.dat", 12, 10000)
+
+	// X2: append 20000 bytes to cont.dat: the next free cluster is beyond
+	// block.dat so the file fragments and its FAT chain must be
+	// materialized (stat 2 -> 3 -> chain on FAT).
+	appendPat(t, fsys, "cont.dat", 11, 20000, 20000)
+
+	// X3: truncate cont.dat 40000 -> 5000: drops the fragmented tail; the
+	// remaining head is contiguous again.
+	var f File
+	if err := fsys.OpenFile(&f, "cont.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open cont.dat trunc: %v", err)
+	}
+	if err := f.Truncate(5000); err != nil {
+		t.Fatalf("truncate cont.dat: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close cont.dat trunc: %v", err)
+	}
+
+	// X4: mid-file overwrite of block.dat (misaligned, stays contiguous:
+	// NoFatChain must survive an in-place rewrite).
+	if err := fsys.OpenFile(&f, "block.dat", ModeRW|ModeOpenExisting); err != nil {
+		t.Fatalf("open block.dat: %v", err)
+	}
+	if _, err := f.Seek(1234, 0); err != nil {
+		t.Fatalf("seek block.dat: %v", err)
+	}
+	writePat(t, &f, 13, 0, 4000)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close block.dat: %v", err)
+	}
+
+	// X5: rename with a unicode name: exFAT name hash recompute.
+	if err := fsys.Rename("cont.dat", "contiñuación.dat"); err != nil {
+		t.Fatalf("rename cont.dat: %v", err)
+	}
+
+	// X6: deep directory nesting (exFAT directories have no dot entries).
+	for _, d := range []string{"deep", "deep/deeper", "deep/deeper/deepest"} {
+		if err := fsys.Mkdir(d); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	writeStr(t, fsys, "deep/deeper/deepest/bottom.txt", "made it")
+
+	// X7: delete-and-reuse: free block.dat's clusters then thread
+	// refill.dat = 15000 bytes (tag 14) through the bitmap hole.
+	if err := fsys.Remove("block.dat"); err != nil {
+		t.Fatalf("remove block.dat: %v", err)
+	}
+	createPat(t, fsys, "refill.dat", 14, 15000)
+
+	// X8: move the renamed unicode file into the deep directory.
+	if err := fsys.Rename("contiñuación.dat", "deep/contiñuación.dat"); err != nil {
+		t.Fatalf("move unicode: %v", err)
+	}
+}
+
+// TestFormatExFATGolden formats a blank 64MiB device with the same
+// parameters as mkgolden.c's f_mkfs(FM_EXFAT|FM_SFD, au 512) and requires
+// the result to match golden-fmtex.img byte for byte, then mounts it and
+// runs the full torture scripts as an end-to-end check.
+func TestFormatExFATGolden(t *testing.T) {
+	skipIfNoExFAT(t)
+	want := goldenImage(t, "golden-fmtex.img")
+	blk, err := makeBlockIndexer(512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &BlockByteSlice{blk: blk, buf: make([]byte, len(want))}
+	var fmtr Formatter
+	err = fmtr.Format(dev, 512, len(want)/512, FormatConfig{
+		Format:      FormatExFAT,
+		ClusterSize: 1, // 1 block = 512 byte clusters, matching mkgolden.c au 512.
+	})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	compareGolden(t, dev, "golden-fmtex.img")
+
+	// The formatted volume must behave identically to the C-formatted one.
+	var fsys FS
+	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
+		t.Fatalf("Mount formatted volume: %v", err)
+	}
+	tortureScript32(t, &fsys)
+	tortureScriptExFAT(t, &fsys)
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+	compareGolden(t, dev, "golden-tortureex.img")
+}
+
+// TestExFATBigFile exercises the 64-bit file size support: on a sparse
+// 5GiB device a file is stretched past the 4GiB FAT limit via WriteAt,
+// synced (64-bit sizes in the entry set) and read back. The whole chain is
+// contiguous (NoFatChain) so FAT values are generated, not stored.
+func TestExFATBigFile(t *testing.T) {
+	skipIfNoExFAT(t)
+	if testing.Short() {
+		t.Skip("big file test, skipped in -short")
+	}
+	const gib = int64(1) << 30
+	const devSize = 5 * gib
+	dev := &BlockMap{size: devSize}
+	var fmtr Formatter
+	err := fmtr.Format(dev, 512, int(devSize/512), FormatConfig{Format: FormatExFAT})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	var fsys FS
+	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	const off = 4*gib + 12345 // Past the 4GiB-1 FATxx file size limit.
+	const n = 4000
+	var f File
+	if err := fsys.OpenFile(&f, "big.bin", ModeCreateAlways|ModeRW); err != nil {
+		t.Fatalf("create big.bin: %v", err)
+	}
+	writeAtPat(t, &f, 1, off, n)
+	if f.Size() != off+n {
+		t.Fatalf("Size() = %d, want %d", f.Size(), off+n)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close big.bin: %v", err)
+	}
+
+	var info FileInfo
+	if err := fsys.Stat("big.bin", &info); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Size() != off+n {
+		t.Fatalf("Stat size = %d, want %d (64-bit size lost)", info.Size(), off+n)
+	}
+	if err := fsys.OpenFile(&f, "big.bin", ModeRead); err != nil {
+		t.Fatalf("reopen big.bin: %v", err)
+	}
+	checkPatAt(t, &f, "big.bin", 1, off, n, 0)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+	t.Logf("sparse device holds %d blocks (%d KiB) for a %.2f GiB file",
+		len(dev.data), len(dev.data)/2, float64(off+n)/float64(gib))
+}
+
+// spotCheckExFAT verifies the exFAT-specific script results through the
+// read API before the byte-level comparison.
+func spotCheckExFAT(t *testing.T, dev *BlockByteSlice) {
+	var fsys FS
+	if err := fsys.Mount(dev, 512, ModeRead); err != nil {
+		t.Fatalf("verify re-mount: %v", err)
+	}
+	uni := readAllFile(t, &fsys, "deep/contiñuación.dat")
+	if len(uni) != 5000 {
+		t.Fatalf("contiñuación.dat len = %d, want 5000", len(uni))
+	}
+	for i, b := range uni {
+		if b != pat(11, i) {
+			t.Fatalf("contiñuación.dat[%d] mismatch", i)
+		}
+	}
+	var f File
+	if err := fsys.OpenFile(&f, "block.dat", ModeRead); err == nil {
+		t.Fatal("block.dat still exists after Remove")
+	}
+	refill := readAllFile(t, &fsys, "refill.dat")
+	if len(refill) != 15000 || refill[14999] != pat(14, 14999) {
+		t.Fatalf("refill.dat mismatch (len %d)", len(refill))
+	}
+	if got := readAllFile(t, &fsys, "deep/deeper/deepest/bottom.txt"); string(got) != "made it" {
+		t.Fatalf("bottom.txt = %q", got)
+	}
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("verify Unmount: %v", err)
+	}
+}
+
 // TestExFATGoldenMount mounts the freshly formatted exFAT golden image and
 // checks the root directory is empty.
 func TestExFATGoldenMount(t *testing.T) {

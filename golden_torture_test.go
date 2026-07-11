@@ -513,15 +513,25 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	if fsys.fstype != fstypeFAT32 {
 		t.Fatalf("fstype = %d, want FAT32", fsys.fstype)
 	}
+	tortureScript32(t, &fsys)
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("fs.Unmount: %v", err)
+	}
+	spotCheck32(t, dev)
+	compareGolden(t, dev, "golden-torture32.img")
+}
 
+// tortureScript32 mirrors script32() in mkgolden.c and is shared by the
+// FAT32 and exFAT golden torture tests (both volumes use 512B clusters).
+func tortureScript32(t *testing.T, fsys *FS) {
 	// S1: 140 LFN files in the root directory force repeated root-dir
 	// stretch (each file needs 4 dir entries = 1/4 cluster).
 	for i := 0; i < 140; i++ {
-		writeStr(t, &fsys, fmt.Sprintf("root%03d file with a long name.txt", i), fmt.Sprintf("file %03d", i))
+		writeStr(t, fsys, fmt.Sprintf("root%03d file with a long name.txt", i), fmt.Sprintf("file %03d", i))
 	}
 
 	// S2: big.dat = 100000 bytes (tag 1), ~196 cluster chain.
-	createPat(t, &fsys, "big.dat", 1, 100000)
+	createPat(t, fsys, "big.dat", 1, 100000)
 
 	// S3: remove every third root file: punches LFN-block holes in the
 	// stretched root directory and frees clusters.
@@ -533,10 +543,10 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	}
 
 	// S4: append 50000 bytes to big.dat.
-	appendPat(t, &fsys, "big.dat", 1, 100000, 50000)
+	appendPat(t, fsys, "big.dat", 1, 100000, 50000)
 
 	// S5: huge.dat = 150000 bytes (tag 2).
-	createPat(t, &fsys, "huge.dat", 2, 150000)
+	createPat(t, fsys, "huge.dat", 2, 150000)
 
 	// S6: mid-file overwrite of big.dat at misaligned offset 99991 (tag 3).
 	var f File
@@ -570,7 +580,7 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	}
 
 	// S9: big2.dat = 200000 bytes (tag 5) wraps into the freed chain.
-	createPat(t, &fsys, "big2.dat", 5, 200000)
+	createPat(t, fsys, "big2.dat", 5, 200000)
 
 	// S10: logs directory with 24 LFN files: the sub-directory table is a
 	// 512B-cluster chain that stretches repeatedly (24 files x 4 entries
@@ -579,7 +589,7 @@ func TestGoldenTortureFAT32(t *testing.T) {
 		t.Fatalf("mkdir logs: %v", err)
 	}
 	for i := 0; i < 24; i++ {
-		writeStr(t, &fsys, fmt.Sprintf("logs/log entry number %03d.txt", i), fmt.Sprintf("entry %03d", i))
+		writeStr(t, fsys, fmt.Sprintf("logs/log entry number %03d.txt", i), fmt.Sprintf("entry %03d", i))
 	}
 
 	// S11: positional writes on big2.dat: 4000 bytes at 123456 (tag 6)
@@ -623,13 +633,15 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	if err := fsys.Rename("logs/inner", "inner"); err != nil {
 		t.Fatalf("move inner: %v", err)
 	}
-	writeStr(t, &fsys, "inner/done.txt", "ok")
+	writeStr(t, fsys, "inner/done.txt", "ok")
+}
 
-	if err := fsys.Unmount(); err != nil {
-		t.Fatalf("fs.Unmount: %v", err)
-	}
-
-	// Spot-check via read API before the byte-level comparison.
+// spotCheck32 re-mounts the device read-only and verifies file contents
+// through the read API before the byte-level image comparison. Shared by
+// the FAT32 and exFAT golden torture tests.
+func spotCheck32(t *testing.T, dev *BlockByteSlice) {
+	var fsys FS
+	var f File
 	if err := fsys.Mount(dev, 512, ModeRead); err != nil {
 		t.Fatalf("verify re-mount: %v", err)
 	}
@@ -677,6 +689,4 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	if err := fsys.Unmount(); err != nil {
 		t.Fatalf("verify Unmount: %v", err)
 	}
-
-	compareGolden(t, dev, "golden-torture32.img")
 }

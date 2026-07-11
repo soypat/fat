@@ -13,16 +13,21 @@ type BlockDeviceExtended interface {
 
 const blkmapsize = 512
 
+// BlockMap is a sparse in-memory block device: only written blocks consume
+// memory, so it can back volumes far larger than available RAM. Reads of
+// never-written blocks return zeros.
 type BlockMap struct {
 	data map[int64][blkmapsize]byte
+	size int64 // Device size in bytes; defaults to 4GB when zero.
 }
 
 func (b *BlockMap) BlockSize() int { return blkmapsize }
 
 func (b *BlockMap) Size() int64 {
-	const kilobyte = 1000
-	const megabyte = 1000 * kilobyte
-	const gigabyte = 1000 * megabyte
+	if b.size != 0 {
+		return b.size
+	}
+	const gigabyte = 1000 * 1000 * 1000
 	return 4 * gigabyte // 4GB does not overflow uint32, so likely safe for use with FAT32?
 }
 
@@ -30,15 +35,16 @@ func (b *BlockMap) ReadBlocks(dst []byte, startBlock int64) (int, error) {
 	if startBlock < 0 {
 		return 0, errors.New("invalid startBlock")
 	}
-
-	lastbidx := len(dst) / blkmapsize
 	if len(dst)%blkmapsize != 0 {
 		return 0, errors.New("dst size not multiple of block size")
 	}
-	for bidx := int64(0); bidx < int64(lastbidx); bidx++ {
-		block := b.data[bidx]
-		copy(dst[:], block[:])
-		dst = dst[blkmapsize:]
+	lastbidx := int64(len(dst) / blkmapsize)
+	if (startBlock+lastbidx)*blkmapsize > b.Size() {
+		return 0, errors.New("read past end of device")
+	}
+	for bidx := int64(0); bidx < lastbidx; bidx++ {
+		block := b.data[startBlock+bidx]
+		copy(dst[bidx*blkmapsize:], block[:])
 	}
 	return len(dst), nil
 }
@@ -47,17 +53,20 @@ func (b *BlockMap) WriteBlocks(data []byte, startBlock int64) (int, error) {
 	if startBlock < 0 {
 		return 0, errors.New("invalid startBlock")
 	}
-
-	lastbidx := len(data) / blkmapsize
 	if len(data)%blkmapsize != 0 {
 		return 0, errors.New("data size not multiple of block size")
 	}
+	lastbidx := int64(len(data) / blkmapsize)
+	if (startBlock+lastbidx)*blkmapsize > b.Size() {
+		return 0, errors.New("write past end of device")
+	}
+	if b.data == nil {
+		b.data = make(map[int64][blkmapsize]byte)
+	}
 	var auxblk [blkmapsize]byte
-	for bidx := int64(0); bidx < int64(lastbidx); bidx++ {
-		copy(auxblk[:], data[:])
-		b.data[bidx] = auxblk
-		data = data[blkmapsize:]
-		auxblk = [blkmapsize]byte{}
+	for bidx := int64(0); bidx < lastbidx; bidx++ {
+		copy(auxblk[:], data[bidx*blkmapsize:])
+		b.data[startBlock+bidx] = auxblk
 	}
 	return len(data), nil
 }
