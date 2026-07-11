@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"math/bits"
 	"sync"
@@ -191,6 +192,22 @@ const (
 
 func (fr fileResult) Error() string {
 	return fr.String()
+}
+
+// Is maps FAT results onto the standard library sentinels so callers can use
+// errors.Is with fs.ErrNotExist and friends.
+func (fr fileResult) Is(target error) bool {
+	switch target {
+	case fs.ErrNotExist:
+		return fr == frNoFile || fr == frNoPath
+	case fs.ErrExist:
+		return fr == frExist
+	case fs.ErrInvalid:
+		return fr == frInvalidName || fr == frInvalidParameter || fr == frInvalidObject
+	case fs.ErrPermission:
+		return fr == frDenied || fr == frWriteProtected
+	}
+	return false
 }
 
 // bootsectorstatus is the return code for mount_volume.

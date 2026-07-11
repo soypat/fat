@@ -49,9 +49,9 @@ func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig)
 			szAu = 256
 		}
 	}
-	bFat := uint32(32)                                     // FAT start at offset 32.
-	szFat := ((szVol/szAu+2)*4 + ss - 1) / ss              // Number of FAT sectors.
-	bData := (bFat + szFat + szBlk - 1) &^ (szBlk - 1)     // Align data area to the erase block boundary.
+	bFat := uint32(32)                                 // FAT start at offset 32.
+	szFat := ((szVol/szAu+2)*4 + ss - 1) / ss          // Number of FAT sectors.
+	bData := (bFat + szFat + szBlk - 1) &^ (szBlk - 1) // Align data area to the erase block boundary.
 	if bData >= szVol/2 {
 		return frMkfsAborted // Too small volume.
 	}
@@ -59,7 +59,7 @@ func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig)
 	if nClst < 16 || nClst > clustMaxExFAT {
 		return frMkfsAborted // Too few or too many clusters.
 	}
-	szbBit := (nClst + 7) / 8                    // Size of allocation bitmap in bytes.
+	szbBit := (nClst + 7) / 8                     // Size of allocation bitmap in bytes.
 	clen0 := (szbBit + szAu*ss - 1) / (szAu * ss) // Number of allocation bitmap clusters.
 	win := f.window[:ss]
 
@@ -188,14 +188,14 @@ func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig)
 	for k := range win {
 		win[k] = 0
 	}
-	win[sizeDirEntry*0+0] = etVLABEL // Volume label entry (no label).
-	win[sizeDirEntry*1+0] = etBITMAP // Bitmap entry.
-	binary.LittleEndian.PutUint32(win[sizeDirEntry*1+20:], 2)        // cluster
-	binary.LittleEndian.PutUint32(win[sizeDirEntry*1+24:], szbBit)   // size
-	win[sizeDirEntry*2+0] = etUPCASE // Up-case table entry.
-	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+4:], sum)       // sum
-	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+20:], 2+clen0)  // cluster
-	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+24:], szbCase)  // size
+	win[sizeDirEntry*0+0] = etVLABEL                                // Volume label entry (no label).
+	win[sizeDirEntry*1+0] = etBITMAP                                // Bitmap entry.
+	binary.LittleEndian.PutUint32(win[sizeDirEntry*1+20:], 2)       // cluster
+	binary.LittleEndian.PutUint32(win[sizeDirEntry*1+24:], szbBit)  // size
+	win[sizeDirEntry*2+0] = etUPCASE                                // Up-case table entry.
+	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+4:], sum)      // sum
+	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+20:], 2+clen0) // cluster
+	binary.LittleEndian.PutUint32(win[sizeDirEntry*2+24:], szbCase) // size
 	for nsect > 0 {
 		if _, err := f.bd.WriteBlocks(win, int64(sect)); err != nil {
 			return err
@@ -215,26 +215,26 @@ func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig)
 		for k := range win {
 			win[k] = 0
 		}
-		copy(win, "\xEB\x76\x90EXFAT   ") // Boot jump code (x86), OEM name.
-		binary.LittleEndian.PutUint64(win[bpbVolOfsEx:], 0)              // Volume offset in the physical drive.
-		binary.LittleEndian.PutUint64(win[bpbTotSecEx:], uint64(szVol))  // Volume size in sectors.
-		binary.LittleEndian.PutUint32(win[bpbFatOfsEx:], bFat)           // FAT offset.
-		binary.LittleEndian.PutUint32(win[bpbFatSzEx:], szFat)           // FAT size.
-		binary.LittleEndian.PutUint32(win[bpbDataOfsEx:], bData)         // Data offset.
-		binary.LittleEndian.PutUint32(win[bpbNumClusEx:], nClst)         // Number of clusters.
+		copy(win, "\xEB\x76\x90EXFAT   ")                                 // Boot jump code (x86), OEM name.
+		binary.LittleEndian.PutUint64(win[bpbVolOfsEx:], 0)               // Volume offset in the physical drive.
+		binary.LittleEndian.PutUint64(win[bpbTotSecEx:], uint64(szVol))   // Volume size in sectors.
+		binary.LittleEndian.PutUint32(win[bpbFatOfsEx:], bFat)            // FAT offset.
+		binary.LittleEndian.PutUint32(win[bpbFatSzEx:], szFat)            // FAT size.
+		binary.LittleEndian.PutUint32(win[bpbDataOfsEx:], bData)          // Data offset.
+		binary.LittleEndian.PutUint32(win[bpbNumClusEx:], nClst)          // Number of clusters.
 		binary.LittleEndian.PutUint32(win[bpbRootClusEx:], 2+clen0+clen1) // Root directory cluster.
-		binary.LittleEndian.PutUint32(win[bpbVolIDEx:], vsn)             // VSN.
-		binary.LittleEndian.PutUint16(win[bpbFSVerEx:], 0x100)           // Filesystem version 1.00.
+		binary.LittleEndian.PutUint32(win[bpbVolIDEx:], vsn)              // VSN.
+		binary.LittleEndian.PutUint16(win[bpbFSVerEx:], 0x100)            // Filesystem version 1.00.
 		for c, k := byte(0), ss; k > 1; c, k = c+1, k>>1 {
 			win[bpbBytsPerSecEx] = c + 1 // Log2 of sector size.
 		}
 		for c, k := byte(0), szAu; k > 1; c, k = c+1, k>>1 {
 			win[bpbSecPerClusEx] = c + 1 // Log2 of cluster size.
 		}
-		win[bpbNumFATsEx] = 1                                 // Number of FATs.
-		win[bpbDrvNumEx] = 0x80                               // Drive number (for int13).
+		win[bpbNumFATsEx] = 1                                     // Number of FATs.
+		win[bpbDrvNumEx] = 0x80                                   // Drive number (for int13).
 		binary.LittleEndian.PutUint16(win[bsBootCodeEx:], 0xFEEB) // Boot code (x86 jump-to-self).
-		binary.LittleEndian.PutUint16(win[510:], 0xAA55)      // Signature.
+		binary.LittleEndian.PutUint16(win[510:], 0xAA55)          // Signature.
 		sum = 0
 		for k := uint32(0); k < ss; k++ {
 			// VBR checksum; volume flags and percent-in-use are excluded.
@@ -776,8 +776,8 @@ func create_xdir(dirb []byte, lfn []uint16) {
 			break // No more C1 entries needed.
 		}
 	}
-	dirb[xdirNumName] = nlen    // Set name length.
-	dirb[xdirNumSec] = 1 + nc1  // Set secondary count (C0 + C1s).
+	dirb[xdirNumName] = nlen                                           // Set name length.
+	dirb[xdirNumSec] = 1 + nc1                                         // Set secondary count (C0 + C1s).
 	binary.LittleEndian.PutUint16(dirb[xdirNameHash:], xname_sum(lfn)) // Set name hash.
 }
 
@@ -844,8 +844,8 @@ func (fsys *FS) f_sync_exfat(fp *File, tm uint32) (fr fileResult) {
 		return fr
 	}
 	dirb := fsys.dirbuf[:]
-	dirb[xdirAttr] |= amARC                     // 'file changed' attribute.
-	dirb[xdirGenFlags] = fp.obj.stat | 1        // Update file allocation information.
+	dirb[xdirAttr] |= amARC              // 'file changed' attribute.
+	dirb[xdirGenFlags] = fp.obj.stat | 1 // Update file allocation information.
 	binary.LittleEndian.PutUint32(dirb[xdirFstClus:], fp.obj.sclust)
 	binary.LittleEndian.PutUint64(dirb[xdirFileSize:], uint64(fp.obj.objsize))
 	binary.LittleEndian.PutUint64(dirb[xdirValidFileSize:], uint64(fp.obj.objsize)) // Valid File Size feature unsupported: always equal.
@@ -898,8 +898,8 @@ func (dj *dir) mkdir_fin_exfat(dcl, tm uint32) fileResult {
 	szb := uint64(fsys.csize) * uint64(fsys.ssize)
 	binary.LittleEndian.PutUint64(dirb[xdirFileSize:], szb) // Directory size needs to be valid.
 	binary.LittleEndian.PutUint64(dirb[xdirValidFileSize:], szb)
-	dirb[xdirGenFlags] = 3   // Contiguous, allocation possible.
-	dirb[xdirAttr] = amDIR   // Attribute.
+	dirb[xdirGenFlags] = 3 // Contiguous, allocation possible.
+	dirb[xdirAttr] = amDIR // Attribute.
 	return dj.store_xdir()
 }
 

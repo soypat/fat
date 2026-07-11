@@ -22,8 +22,12 @@ const (
 	ModeCreateAlways Mode = Mode(faCreateAlways)
 	ModeOpenExisting Mode = Mode(faOpenExisting)
 	ModeOpenAppend   Mode = Mode(faOpenAppend)
+	// ModeOpenAlways opens the file, creating it if it does not exist. Unlike
+	// ModeCreateAlways the contents of an existing file are preserved and the
+	// read/write pointer starts at the beginning of the file.
+	ModeOpenAlways Mode = Mode(faOpenAlways)
 
-	allowedModes = ModeRead | ModeWrite | ModeCreateNew | ModeCreateAlways | ModeOpenExisting | ModeOpenAppend
+	allowedModes = ModeRead | ModeWrite | ModeCreateNew | ModeCreateAlways | ModeOpenExisting | ModeOpenAppend | ModeOpenAlways
 )
 
 var (
@@ -422,6 +426,21 @@ func (fsys *FS) OpenDir(dp *Dir, path string) error {
 	if fr != frOK {
 		return fr
 	}
+	return nil
+}
+
+// Close closes the directory, invalidating the handle. A directory holds no
+// unwritten state, so unlike (*File).Close this flushes nothing to the device.
+// The Dir can be reused by passing it to OpenDir again.
+func (dp *Dir) Close() error {
+	fsys, fr := dp.lock()
+	if fr != frOK {
+		return fr
+	}
+	defer fsys.mu.Unlock()
+	// Invalidate the handle by id instead of clearing obj.fs, matching
+	// (*File).f_close: the exported lock path reads obj.fs unsynchronized.
+	dp.obj.id--
 	return nil
 }
 
