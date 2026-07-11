@@ -476,6 +476,49 @@ func (dp *Dir) ForEachFile(callback func(*FileInfo) error) error {
 	}
 }
 
+// Rewind resets the directory cursor to the first entry, so the next
+// ReadNext starts the walk over. It is the only way to restart a walk: a
+// directory cursor cannot be seeked to an arbitrary entry.
+func (dp *Dir) Rewind() error {
+	fsys, fr := dp.lock()
+	if fr != frOK {
+		return fr
+	}
+	defer fsys.mu.Unlock()
+	fr = dp.sdi(0) // Rewind directory.
+	if fr != frOK {
+		return fr
+	}
+	return nil
+}
+
+// ReadNext reads the next directory entry into dst. The "." and ".."
+// pseudo-entries and the volume label are skipped. It returns io.EOF once
+// the directory is exhausted; calls past that keep returning io.EOF until
+// Rewind.
+//
+// Unlike ForEachFile, ReadNext holds the filesystem lock only for the
+// duration of the call, so the FS may be used between entries. The walk is
+// then not atomic: entries added or removed mid-walk may be skipped or
+// repeated.
+func (dp *Dir) ReadNext(dst *FileInfo) error {
+	fsys, fr := dp.lock()
+	if fr != frOK {
+		return fr
+	}
+	defer fsys.mu.Unlock()
+	if fsys.perm&ModeRead == 0 {
+		return errForbiddenMode
+	}
+	fr = dp.f_readdir(dst)
+	if fr != frOK {
+		return fr
+	} else if dst.fname[0] == 0 {
+		return io.EOF
+	}
+	return nil
+}
+
 var _ fs.FileInfo = (*FileInfo)(nil)
 
 // AlternateName returns the alternate name of the file.
@@ -485,7 +528,17 @@ func (finfo *FileInfo) AlternateName() string {
 
 // Name returns the name of the file.
 func (finfo *FileInfo) Name() string {
-	return str(finfo.fname[:])
+	return string(finfo.nameview())
+}
+
+// AppendName appends the name of the file to dst.
+func (finfo *FileInfo) AppendName(dst []byte) []byte {
+	return append(dst, finfo.nameview()...)
+}
+
+// nameview returns the file name bytes, truncated at the NUL terminator.
+func (finfo *FileInfo) nameview() []byte {
+	return bstr(finfo.fname[:])
 }
 
 // Size returns the size of the file in bytes.

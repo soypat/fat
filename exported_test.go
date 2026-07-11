@@ -648,3 +648,72 @@ func TestUnmount(t *testing.T) {
 		t.Errorf("Size=%d after remount, want 4", info.Size())
 	}
 }
+
+// TestFileInfoName verifies Name returns exactly the entry's name and not
+// the rest of the fixed-size name buffer: no NUL terminator, no leftover
+// bytes when a FileInfo is reused across entries of decreasing name length.
+func TestFileInfoName(t *testing.T) {
+	fs, _ := initTestFAT()
+	names := []string{"a long file name test.txt", "ab.txt"}
+	if !lfnEnabled {
+		names = []string{"longname.txt", "ab.txt"} // 8.3 names only.
+	}
+	for _, name := range names {
+		var f File
+		if err := fs.OpenFile(&f, "/"+name, ModeCreateNew|ModeWrite); err != nil {
+			t.Fatal(name, err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	seen := map[string]bool{"rootfile": false, "rootdir": false}
+	for _, name := range names {
+		seen[name] = false
+	}
+	var dir Dir
+	if err := fs.OpenDir(&dir, "/"); err != nil {
+		t.Fatal(err)
+	}
+	var fi FileInfo
+	for {
+		// Poison the reused buffer: a correct Name may not depend on it
+		// being zeroed beyond the entry's own terminator.
+		for i := range fi.fname {
+			fi.fname[i] = 'X'
+		}
+		err := dir.ReadNext(&fi)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		name := fi.Name()
+		if strings.IndexByte(name, 0) >= 0 {
+			t.Errorf("Name %q contains NUL", name)
+		}
+		if got := string(fi.AppendName(nil)); got != name {
+			t.Errorf("AppendName = %q, Name = %q", got, name)
+		}
+		matched := false
+		for want, dup := range seen {
+			// Case-insensitive: the fat_nolfn build reports the uppercase SFN.
+			if strings.EqualFold(name, want) {
+				if dup {
+					t.Errorf("entry %q listed twice", name)
+				}
+				seen[want] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected name %q (stale bytes past terminator?)", name)
+		}
+	}
+	for want, ok := range seen {
+		if !ok {
+			t.Errorf("entry %q not listed", want)
+		}
+	}
+}
