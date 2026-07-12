@@ -30,7 +30,7 @@ func maxdirb(nc uint32) uint32 { return (nc + 44) / 15 * 32 }
 // holding the allocation bitmap, the RLE-compressed up-case table and the
 // root directory. Byte-identical to a FatFs f_mkfs with FM_EXFAT|FM_SFD,
 // a zero get_fattime() and erase-block size 1.
-func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig) error {
+func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatParams) error {
 	const szBlk = 1 // Erase block size in sectors (data area alignment).
 	ss := uint32(blocksize)
 	szVol := uint32(fsSizeInBlocks)
@@ -371,7 +371,7 @@ func (fsys *FS) init_exfat() fileResult {
 	fsys.last_clst = 0xffff_ffff
 	fsys.free_clst = 0xffff_ffff
 	fsys.fsi_flag = 0 // Enable syncing the PercInUse value in the VBR.
-	fsys.fstype = fstypeExFAT
+	fsys.fstype = FormatExFAT
 	fsys.id++ // Increment filesystem ID, invalidates open files.
 	return frOK
 }
@@ -957,6 +957,42 @@ func (dp *dir) read_exfat(vol bool) (fr fileResult) {
 		dp.sect = 0 // Terminate the read operation on error or EOT.
 	}
 	return fr
+}
+
+// getlabel_exfat appends the volume label of the 0x83 entry at dir to dst,
+// converted from UTF-16 to UTF-8. A malformed entry yields an empty label.
+func (fsys *FS) getlabel_exfat(dst, dir []byte) []byte {
+	start := len(dst)
+	nlabel := int(dir[xdirNumLabel])
+	if nlabel > 11 {
+		return dst // The label field holds at most 11 UTF-16 units.
+	}
+	var utf [4]byte
+	var hs uint16
+	for si := 0; si < nlabel; si++ {
+		wc := binary.LittleEndian.Uint16(dir[xdirLabel+si*2:])
+		if hs == 0 && isSurrogate(wc) {
+			hs = wc // Get low surrogate.
+			continue
+		}
+		r := rune(wc)
+		if hs != 0 {
+			r = utf16.DecodeRune(rune(hs), rune(wc))
+			if r == 0xFFFD {
+				return dst[:start] // Wrong surrogate pair.
+			}
+		}
+		nw := put_utf8(r, utf[:])
+		if nw == 0 {
+			return dst[:start] // Wrong char.
+		}
+		dst = append(dst, utf[:nw]...)
+		hs = 0
+	}
+	if hs != 0 {
+		return dst[:start] // Broken surrogate pair.
+	}
+	return dst
 }
 
 // find_exfat is the exFAT branch of dir.find: the name to find is in

@@ -36,7 +36,7 @@ type FS struct {
 	// state, so there is no finer grain.
 	mu sync.Mutex
 
-	fstype   fstype
+	fstype   Format
 	nFATs    uint8
 	wflag    uint8  // b0:dirty
 	fsi_flag uint8  // FSInfo dirty flag. b7:disabled, b0:dirty.
@@ -132,16 +132,6 @@ type mkfsParam struct {
 	n_root  uint32
 	au_size uint32 // cluster size in bytes.
 }
-
-type fstype byte
-
-const (
-	fstypeUnknown fstype = iota
-	fstypeFAT12
-	fstypeFAT16
-	fstypeFAT32
-	fstypeExFAT
-)
 
 type diskstatus uint8
 
@@ -338,7 +328,7 @@ func (obj *objid) validate() fileResult {
 }
 
 func (fsys *FS) isExfat() bool {
-	return exfatEnabled && fsys.fstype == fstypeExFAT
+	return exfatEnabled && fsys.fstype == FormatExFAT
 }
 
 func (fsys *FS) f_sync(fp *File) (fr fileResult) {
@@ -396,7 +386,7 @@ func (fp *File) f_write(buf []byte) (bw int, fr fileResult) {
 	}
 	fs := fp.obj.fs
 	btw := len(buf)
-	if fs.fstype != fstypeExFAT && fp.fptr+int64(btw) < fp.fptr {
+	if fs.fstype != FormatExFAT && fp.fptr+int64(btw) < fp.fptr {
 		// Make sure file does not reach over 4GB limit on non exFAT.
 		btw = int(int64(maxu32) - fp.fptr)
 	}
@@ -773,7 +763,7 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 	}
 
 	// Normal seek.
-	if fsys.fstype != fstypeExFAT && ofs >= 0x1_0000_0000 {
+	if fsys.fstype != FormatExFAT && ofs >= 0x1_0000_0000 {
 		ofs = 0xFFFF_FFFF // Clip at 4 GiB - 1 for FATxx.
 	}
 	if ofs > fp.obj.objsize && fp.flag&faWrite == 0 {
@@ -989,6 +979,34 @@ func (fsys *FS) f_stat(path string, fno *FileInfo) (res fileResult) {
 		fno.fname[0] = 0 // Invalidate file information on error.
 	}
 	return res
+}
+
+// f_getlabel appends the volume label to dst and returns the extended buffer.
+// A volume with no label entry in its root directory has an empty label and
+// appends nothing. Ported from FatFs' f_getlabel; the volume serial number is
+// available from the boot sector, see [biosParamBlock].
+func (fsys *FS) f_getlabel(dst []byte) ([]byte, fileResult) {
+	fsys.trace("f_getlabel")
+	if fsys.fstype == _FormatUnknown {
+		return dst, frNoFilesystem // Not mounted.
+	}
+	var dj dir
+	dj.obj.fs = fsys
+	dj.obj.sclust = 0 // Open the root directory.
+	fr := dj.sdi(0)
+	if fr != frOK {
+		return dst, fr
+	}
+	fr = dj.read(true) // Find the volume label entry.
+	if fr == frNoFile {
+		return dst, frOK // No label entry: the label is the empty string.
+	} else if fr != frOK {
+		return dst, fr
+	}
+	if fsys.isExfat() {
+		return fsys.getlabel_exfat(dst, dj.dir), frOK
+	}
+	return fsys.getlabel_sfn(dst, dj.dir), frOK
 }
 
 // f_mkdir creates a new sub-directory at path.
@@ -1264,7 +1282,7 @@ func (fsys *FS) sync() fileResult {
 		return fr
 	}
 	fsys.fsi_flag = 0
-	if fsys.fstype == fstypeFAT32 {
+	if fsys.fstype == FormatFAT32 {
 		// Create FSInfo structure.
 		fsys.window_clr()
 		binary.LittleEndian.PutUint16(fsys.win[bs55AA:], 0xAA55)
@@ -1294,7 +1312,7 @@ func (fsys *FS) sync() fileResult {
 // mount initializes the FS with the given BlockDevice.
 func (fsys *FS) mount_volume(bd BlockDevice, ssize uint16, mode uint8) (fr fileResult) {
 	fsys.trace("fs:mount_volume", slog.Int("mode", int(mode)))
-	fsys.fstype = fstypeUnknown // Invalidate any previous mount.
+	fsys.fstype = _FormatUnknown // Invalidate any previous mount.
 	// From here on out we call mount_volume since we don't care about
 	// mutexes or file path handling. File path handling is left to
 	// the Go standard library which does a much better job than us.
@@ -1391,14 +1409,14 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	if sectorsTotal < sectorsNonApplication || clustersTotal == 0 {
 		return frNoFilesystem
 	}
-	var fmt fstype = fstypeFAT12
+	var fmt Format = FormatFAT12
 	switch {
 	case clustersTotal > clustMaxFAT32:
 		return frNoFilesystem // Too many clusters for FAT32.
 	case clustersTotal > clustMaxFAT16:
-		fmt = fstypeFAT32
+		fmt = FormatFAT32
 	case clustersTotal > clustMaxFAT12:
-		fmt = fstypeFAT16
+		fmt = FormatFAT16
 	}
 
 	// Boundaries and limits.
@@ -1407,7 +1425,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	fsys.fatbase = baseSector + lba(sectorsReserved)
 	fsys.database = baseSector + lba(sectorsNonApplication)
 	var neededSizeOfFAT uint32
-	if fmt == fstypeFAT32 {
+	if fmt == FormatFAT32 {
 		if fsys.window_u16(bpbFSVer32) != 0 {
 			return frNoFilesystem // Unsupported FAT subversion, must be 0.0.
 		} else if fsys.nrootdir != 0 {
@@ -1420,7 +1438,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 			return frNoFilesystem // Root directory entry count must not be 0.
 		}
 		fsys.dirbase = fsys.fatbase + lba(sectorsPerFAT)
-		if fmt == fstypeFAT16 {
+		if fmt == FormatFAT16 {
 			neededSizeOfFAT = fsys.n_fatent * 2
 		} else {
 			neededSizeOfFAT = fsys.n_fatent*3/2 + fsys.n_fatent&1
@@ -1438,7 +1456,7 @@ func (fsys *FS) init_fat() fileResult { // Part of mount_volume.
 	fsys.fsi_flag = 1 << 7
 
 	// Update FSInfo.
-	if fmt == fstypeFAT32 && fsys.window_u16(bpbFSInfo32) == 1 && fsys.move_window(baseSector+1) == frOK {
+	if fmt == FormatFAT32 && fsys.window_u16(bpbFSInfo32) == 1 && fsys.move_window(baseSector+1) == frOK {
 		fsys.fsi_flag = 0
 		ok := fsys.window_u16(bs55AA) == 0xaa55 && fsys.window_u32(fsiLeadSig) == 0x41615252 &&
 			fsys.window_u32(fsiStrucSig) == 0x61417272
@@ -1558,9 +1576,9 @@ func (obj *objid) clusterstat(clst uint32) (val uint32) {
 	switch fsys.fstype {
 	default:
 		return 1 // Not supported.
-	case fstypeExFAT:
+	case FormatExFAT:
 		return obj.clusterstat_exfat(clst)
-	case fstypeFAT12:
+	case FormatFAT12:
 		bc := clst + clst/2 // Byte offset of the entry.
 		if fsys.move_window(fsys.fatbase+lba(bc/ss)) != frOK {
 			break
@@ -1576,12 +1594,12 @@ func (obj *objid) clusterstat(clst uint32) (val uint32) {
 		} else {
 			val = wc & 0xFFF
 		}
-	case fstypeFAT16:
+	case FormatFAT16:
 		if fsys.move_window(fsys.fatbase+lba(clst/(ss/2))) != frOK {
 			break
 		}
 		val = uint32(binary.LittleEndian.Uint16(fsys.win[clst*2%ss:])) // Simple WORD array.
-	case fstypeFAT32:
+	case FormatFAT32:
 		ret := fsys.move_window(fsys.fatbase + lba(clst/(ss/4)))
 		if ret != frOK {
 			fsys.logerror("value:move_window", slog.Int("ret", int(ret)))
@@ -1603,7 +1621,7 @@ func (fsys *FS) put_clusterstat(cluster, value uint32) fileResult {
 	switch fsys.fstype {
 	default:
 		return frIntErr // Not supported.
-	case fstypeFAT12:
+	case FormatFAT12:
 		bc := cluster + cluster/2 // Byte offset of the entry.
 		res := fsys.move_window(fsys.fatbase + lba(bc/ss))
 		if res != frOK {
@@ -1628,20 +1646,20 @@ func (fsys *FS) put_clusterstat(cluster, value uint32) fileResult {
 			*p = *p&0xF0 | byte(value>>8)&0x0F
 		}
 		fsys.wflag = 1
-	case fstypeFAT16:
+	case FormatFAT16:
 		res := fsys.move_window(fsys.fatbase + lba(cluster/(ss/2)))
 		if res != frOK {
 			return res
 		}
 		binary.LittleEndian.PutUint16(fsys.win[cluster*2%ss:], uint16(value)) // Simple WORD array.
 		fsys.wflag = 1
-	case fstypeFAT32, fstypeExFAT: // Similar for both FAT32 and exFAT.
+	case FormatFAT32, FormatExFAT: // Similar for both FAT32 and exFAT.
 		res := fsys.move_window(fsys.fatbase + lba(cluster/(ss/4)))
 		if res != frOK {
 			return res
 		}
 		winIdx := cluster * 4 % ss
-		if fsys.fstype != fstypeExFAT {
+		if fsys.fstype != FormatExFAT {
 			value = (value & mask28bits) |
 				(binary.LittleEndian.Uint32(fsys.win[winIdx:]) &^ mask28bits)
 		}
@@ -1739,7 +1757,7 @@ func (fsys *FS) time() uint32 {
 // ld_clust loads start(top) cluster value of the SFN entry using the key entry buffer.
 func (fsys *FS) ld_clust(bdir []byte) (cl uint32) {
 	cl = uint32(binary.LittleEndian.Uint16(bdir[dirFstClusLOOff:]))
-	if fsys.fstype == fstypeFAT32 {
+	if fsys.fstype == FormatFAT32 {
 		cl |= uint32(binary.LittleEndian.Uint16(bdir[dirFstClusHIOff:])) << 16
 	}
 	return cl
@@ -1748,7 +1766,7 @@ func (fsys *FS) ld_clust(bdir []byte) (cl uint32) {
 // st_clust stores a cluster value to the SFN entry using the key entry buffer.
 func (fsys *FS) st_clust(dir []byte, cl uint32) {
 	binary.LittleEndian.PutUint16(dir[dirFstClusLOOff:], uint16(cl))
-	if fsys.fstype == fstypeFAT32 {
+	if fsys.fstype == FormatFAT32 {
 		binary.LittleEndian.PutUint16(dir[dirFstClusHIOff:], uint16(cl>>16))
 	}
 }
@@ -1961,7 +1979,7 @@ func (dp *dir) alloc(nent int) (fr fileResult) {
 		if fr != frOK {
 			break
 		}
-		isEx := fsys.fstype == fstypeExFAT
+		isEx := fsys.fstype == FormatExFAT
 		dname := dp.dir[dirNameOff]
 		if (!isEx && (dname == mskDDEM || dname == 0)) || (isEx && dp.dir[xdirType]&0x80 == 0) {
 			// Entry is free.
@@ -1990,7 +2008,7 @@ func (dp *dir) follow_path(path string) (fr fileResult) {
 	dp.obj.sclust = 0 // Set start directory (always root dir)
 
 	dp.obj.n_frag = 0 // Invalidate last fragment counter.
-	if fsys.fstype == fstypeUnknown {
+	if fsys.fstype == _FormatUnknown {
 		return frNoFilesystem // Not mounted.
 	}
 	if len(path) == 0 || isTermLFN(path[0]) {
@@ -2051,7 +2069,7 @@ func (dp *dir) find() fileResult {
 	if fr != frOK {
 		return fr
 	}
-	if exfatEnabled && fsys.fstype == fstypeExFAT {
+	if exfatEnabled && fsys.fstype == FormatExFAT {
 		return dp.find_exfat()
 	}
 	var ord, sum byte = 0xff, 0xff
@@ -2114,7 +2132,7 @@ func (dp *dir) next(stretch bool) fileResult {
 	fsys := dp.obj.fs
 	fsys.trace("dir:next", slog.Bool("stretch", stretch))
 	ofs := dp.dptr + sizeDirEntry
-	if ofs >= maxDIREx || (ofs >= maxDIR && fsys.fstype != fstypeExFAT) {
+	if ofs >= maxDIREx || (ofs >= maxDIR && fsys.fstype != FormatExFAT) {
 		dp.sect = 0 // Disable if reached maximum offset.
 	}
 	if dp.sect == 0 {
@@ -2184,7 +2202,7 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 	fsys := dp.obj.fs
 	fsys.trace("dir:sdi", slog.Uint64("ofs", uint64(ofs)))
 	switch {
-	case fsys.fstype == fstypeExFAT && ofs >= maxDIREx:
+	case fsys.fstype == FormatExFAT && ofs >= maxDIREx:
 		return frIntErr
 	case ofs >= maxDIR:
 		return frIntErr
@@ -2192,7 +2210,7 @@ func (dp *dir) sdi(ofs uint32) fileResult {
 	dp.dptr = ofs
 	clst := dp.obj.sclust
 	if clst == 0 {
-		if fsys.fstype >= fstypeFAT32 {
+		if fsys.fstype >= FormatFAT32 {
 			clst = uint32(fsys.dirbase)
 			dp.obj.stat = 0 // exFAT: Root dir has a FAT chain.
 		}
@@ -2358,7 +2376,7 @@ func (obj *objid) remove_chain(clst, pclst uint32) (res fileResult) {
 		} else if nxt == badCluster {
 			return frDiskErr
 		}
-		if fsys.fstype != fstypeExFAT {
+		if fsys.fstype != FormatExFAT {
 			// Make cluster 'free' on the FAT.
 			res = fsys.put_clusterstat(clst, 0)
 			if res != frOK {

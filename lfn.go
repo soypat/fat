@@ -378,6 +378,35 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 	fno.datetime.date = binary.LittleEndian.Uint16(dp.dir[dirModTimeOff+2:])
 }
 
+// getlabel_sfn appends the 11-byte OEM volume label of the AM_VOL entry at
+// dir to dst, converted to UTF-8 through the current code page. Trailing
+// spaces are trimmed. An unconvertible character yields an empty label.
+func (fsys *FS) getlabel_sfn(dst, dir []byte) []byte {
+	start := len(dst)
+	var utf [4]byte
+	for si := 0; si < 11; {
+		wc := uint16(dir[si])
+		si++
+		if fsys.dbc_1st(byte(wc)) && si < 11 {
+			wc = wc<<8 | uint16(dir[si]) // Double byte character.
+			si++
+		}
+		wc = ff_oem2uni(wc, fsys.codepage)
+		if wc == 0 {
+			return dst[:start] // Invalid character in the current code page.
+		}
+		nw := put_utf8(rune(wc), utf[:])
+		if nw == 0 {
+			return dst[:start]
+		}
+		dst = append(dst, utf[:nw]...)
+	}
+	for len(dst) > start && dst[len(dst)-1] == ' ' {
+		dst = dst[:len(dst)-1] // Truncate trailing spaces, the label is space padded.
+	}
+	return dst
+}
+
 func put_utf8(r rune, buf []byte) int {
 	if utf8.RuneLen(r) > len(buf) {
 		return 0

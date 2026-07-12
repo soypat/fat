@@ -470,7 +470,7 @@ func TestGoldenTortureFAT12(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if fsys.fstype != fstypeFAT12 {
+	if fsys.fstype != FormatFAT12 {
 		t.Fatalf("fstype = %d, want FAT12", fsys.fstype)
 	}
 	tortureScriptSmall(t, &fsys)
@@ -488,7 +488,7 @@ func TestGoldenTortureFAT16(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if fsys.fstype != fstypeFAT16 {
+	if fsys.fstype != FormatFAT16 {
 		t.Fatalf("fstype = %d, want FAT16", fsys.fstype)
 	}
 	tortureScriptSmall(t, &fsys)
@@ -510,7 +510,7 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if fsys.fstype != fstypeFAT32 {
+	if fsys.fstype != FormatFAT32 {
 		t.Fatalf("fstype = %d, want FAT32", fsys.fstype)
 	}
 	tortureScript32(t, &fsys)

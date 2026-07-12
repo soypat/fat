@@ -38,6 +38,48 @@ var (
 	errNegativeOffset = errors.New("fat: negative offset")
 )
 
+// FormatParams returns the parameters describing the mounted volume, as would
+// be passed to [Formatter.Format] to recreate it. The block size is not part of
+// FormatParams; get it from [FS.BlockSize].
+//
+// Label is read from the volume label entry of the root directory and is empty
+// when the volume has none. [Formatter.Format] does not write one, so a volume
+// only has a label if it was set by another tool.
+func (fsys *FS) FormatParams() (FormatParams, error) {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	label, fr := fsys.f_getlabel(nil)
+	if fr != frOK {
+		return FormatParams{}, fr
+	}
+	return FormatParams{
+		Label:       string(label),
+		Format:      fsys.fstype,
+		ClusterSize: int(fsys.csize),
+	}, nil
+}
+
+// BlockSize returns the block (sector) size in bytes of the mounted volume, as
+// would be passed to [Formatter.Format]. It is zero if not mounted.
+func (fsys *FS) BlockSize() int {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	return int(fsys.ssize)
+}
+
+// AppendLabel appends the volume label of the mounted filesystem to dst and
+// returns the extended buffer. It appends nothing if the volume has no label
+// entry in its root directory.
+func (fsys *FS) AppendLabel(dst []byte) ([]byte, error) {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	label, fr := fsys.f_getlabel(dst)
+	if fr != frOK {
+		return dst, fr
+	}
+	return label, nil
+}
+
 // Dir represents an open FAT directory.
 type Dir struct {
 	dir
@@ -320,15 +362,15 @@ func (fp *File) Close() error {
 func (fsys *FS) Unmount() error {
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
-	if fsys.fstype == fstypeUnknown {
+	if fsys.fstype == _FormatUnknown {
 		return frNoFilesystem // Not mounted.
 	}
 	var fr fileResult = frOK
 	if fsys.perm&ModeWrite != 0 {
 		fr = fsys.sync()
 	}
-	fsys.fstype = fstypeUnknown // Invalidate the filesystem object.
-	fsys.id++                   // Invalidate open files and directories.
+	fsys.fstype = _FormatUnknown // Invalidate the filesystem object.
+	fsys.id++                    // Invalidate open files and directories.
 	fsys.perm = 0
 	fsys.device = nil
 	if fr != frOK {

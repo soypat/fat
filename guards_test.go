@@ -160,7 +160,7 @@ func TestMBRPartition(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("mount MBR-partitioned volume: %v", err)
 	}
-	if fsys.fstype != fstypeFAT16 {
+	if fsys.fstype != FormatFAT16 {
 		t.Fatalf("fstype = %d, want FAT16", fsys.fstype)
 	}
 	// The volume is usable: create and read back a file.

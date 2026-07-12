@@ -34,6 +34,18 @@ func (fsys *FS) put_lfn(dir []byte, ord, sum byte) {}
 
 func (fsys *FS) lfnlen() int { return 0 }
 
+// getlabel_sfn appends the 11-byte volume label of the AM_VOL entry at dir to
+// dst verbatim, in the OEM encoding, with trailing spaces trimmed. Without LFN
+// support there is no unicode conversion table to map it through.
+func (fsys *FS) getlabel_sfn(dst, dir []byte) []byte {
+	start := len(dst)
+	dst = append(dst, dir[:11]...)
+	for len(dst) > start && dst[len(dst)-1] == ' ' {
+		dst = dst[:len(dst)-1] // Truncate trailing spaces, the label is space padded.
+	}
+	return dst
+}
+
 // gen_numname is unreachable without LFN support: create_name never sets nsLOSS.
 func (fsys *FS) gen_numname(dst, src []byte, lfn []uint16, seq uint32) {}
 
@@ -125,7 +137,7 @@ func (dp *dir) get_fileinfo(fno *FileInfo) {
 	fno.fname[0] = 0 // Invalidate.
 	if dp.sect == 0 {
 		return // End of directory reached.
-	} else if dp.obj.fs.fstype == fstypeExFAT {
+	} else if dp.obj.fs.fstype == FormatExFAT {
 		return
 	}
 	var si, di int

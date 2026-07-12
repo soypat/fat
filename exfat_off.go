@@ -37,8 +37,10 @@ func (dj *dir) mkdir_fin_exfat(dcl, tm uint32) fileResult { return frUnsupported
 
 func (djn *dir) rename_restore_exfat(buf *[2 * sizeDirEntry]byte) fileResult { return frUnsupported }
 
-func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatConfig) error {
+func (f *Formatter) formatExFAT(blocksize, fsSizeInBlocks int, cfg FormatParams) error {
 	return frUnsupported
 }
 
 func (dp *dir) get_fileinfo_exfat(fno *FileInfo) {}
+
+func (fsys *FS) getlabel_exfat(dst, dir []byte) []byte { return dst }

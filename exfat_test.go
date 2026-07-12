@@ -15,7 +15,7 @@ func initTestExFAT(numBlocks int) (*FS, *BlockByteSlice, error) {
 	}
 	dev := &BlockByteSlice{blk: blk, buf: make([]byte, numBlocks*512)}
 	var fmtr Formatter
-	err = fmtr.Format(dev, 512, numBlocks, FormatConfig{Format: FormatExFAT})
+	err = fmtr.Format(dev, 512, numBlocks, FormatParams{Format: FormatExFAT})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -42,7 +42,7 @@ func TestGoldenTortureExFAT(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if fsys.fstype != fstypeExFAT {
+	if fsys.fstype != FormatExFAT {
 		t.Fatalf("fstype = %d, want exFAT", fsys.fstype)
 	}
 	tortureScript32(t, &fsys)
@@ -133,7 +133,7 @@ func TestFormatExFATGolden(t *testing.T) {
 	}
 	dev := &BlockByteSlice{blk: blk, buf: make([]byte, len(want))}
 	var fmtr Formatter
-	err = fmtr.Format(dev, 512, len(want)/512, FormatConfig{
+	err = fmtr.Format(dev, 512, len(want)/512, FormatParams{
 		Format:      FormatExFAT,
 		ClusterSize: 1, // 1 block = 512 byte clusters, matching mkgolden.c au 512.
 	})
@@ -168,7 +168,7 @@ func TestExFATBigFile(t *testing.T) {
 	const devSize = 5 * gib
 	dev := &BlockMap{size: devSize}
 	var fmtr Formatter
-	err := fmtr.Format(dev, 512, int(devSize/512), FormatConfig{Format: FormatExFAT})
+	err := fmtr.Format(dev, 512, int(devSize/512), FormatParams{Format: FormatExFAT})
 	if err != nil {
 		t.Fatalf("Format: %v", err)
 	}
