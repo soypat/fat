@@ -234,9 +234,12 @@ func TestFastSeekCLMT(t *testing.T) {
 	if fr := f.f_lseek(createLinkmap); fr != frOK {
 		t.Fatalf("create CLMT: %v", fr)
 	}
-	// Fast seek to a misaligned offset and verify content.
-	if fr := f.f_lseek(4096 + 1234); fr != frOK {
-		t.Fatalf("fast seek: %v", fr)
+	// Fast seek to a misaligned offset and verify content. Through the exported
+	// Seek, not f_lseek: the exported API is positioned by File.pos, and f_lseek
+	// moves only FatFs' pointer underneath it. Seek still reaches the CLMT path,
+	// which is what this is here to cover.
+	if _, err := f.Seek(4096+1234, io.SeekStart); err != nil {
+		t.Fatalf("fast seek: %v", err)
 	}
 	buf := make([]byte, 64)
 	if _, err := f.Read(buf); err != nil {

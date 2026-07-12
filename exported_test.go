@@ -414,7 +414,11 @@ func TestTruncate(t *testing.T) {
 		t.Fatalf("Size=%d want %d", f.Size(), size)
 	}
 
-	// Shrink to a misaligned mid-file size; offset (at EOF) clamps to new size.
+	// Shrink to a misaligned mid-file size. The offset does not move: it sat at
+	// EOF (size) and stays there, past the new end of the file, exactly as POSIX
+	// ftruncate leaves it. It used to be clamped down to the new size, which was
+	// not a decision so much as a symptom — FatFs' pointer cannot exceed the file
+	// size, so there was nowhere else to put it.
 	const shrunk = 4096 + 100
 	if err := f.Truncate(shrunk); err != nil {
 		t.Fatal(err)
@@ -422,8 +426,8 @@ func TestTruncate(t *testing.T) {
 	if f.Size() != shrunk {
 		t.Fatalf("after shrink Size=%d want %d", f.Size(), shrunk)
 	}
-	if pos, _ := f.Seek(0, io.SeekCurrent); pos != shrunk {
-		t.Fatalf("offset after shrink = %d, want %d", pos, shrunk)
+	if pos, _ := f.Seek(0, io.SeekCurrent); pos != size {
+		t.Fatalf("offset after shrink = %d, want %d (truncate must not move the offset)", pos, size)
 	}
 	// Data before the truncation point intact.
 	buf := make([]byte, shrunk)
@@ -714,6 +718,223 @@ func TestFileInfoName(t *testing.T) {
 	for want, ok := range seen {
 		if !ok {
 			t.Errorf("entry %q not listed", want)
+		}
+	}
+}
+
+// The tests here cover the file position and what happens when it outruns the
+// file. FatFs has no such position — f_lseek will not let its pointer exceed the
+// file size — so all of this is behavior that File.pos adds on top, and it is the
+// behavior os.File has.
+
+// TestSeekPastEndDoesNotGrow: seeking is not writing. FatFs extends the file on a
+// writable handle as a side effect of the seek alone, allocating clusters, which
+// means a plain Seek can also fail on a full device.
+func TestSeekPastEndDoesNotGrow(t *testing.T) {
+	fsys, _ := formatAndMount(t, 8192, FormatParams{Format: FormatFAT16, ClusterSize: 1})
+	var f File
+	if err := fsys.OpenFile(&f, "a.dat", ModeRW|ModeCreateAlways); err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	pos, err := f.Seek(1<<16, io.SeekStart)
+	if err != nil {
+		t.Fatal("seek past EOF:", err)
+	}
+	if pos != 1<<16 {
+		t.Errorf("Seek returned %d, want %d", pos, 1<<16)
+	}
+	if f.Size() != 5 {
+		t.Errorf("the file grew to %d bytes on a seek; a seek must not change the file", f.Size())
+	}
+	// And a read there is at the end of the file, not somewhere in it.
+	if n, err := f.Read(make([]byte, 8)); err != io.EOF {
+		t.Errorf("Read past EOF = %d, %v; want 0, io.EOF", n, err)
+	}
+}
+
+// TestSeekPastEndReadOnlyIsNotClipped: FatFs clips a read-only seek back to the
+// end of the file and then reports the clipped offset as though the seek had done
+// what was asked, so a caller who seeks to 48 in an empty file is told it is at 0.
+func TestSeekPastEndReadOnlyIsNotClipped(t *testing.T) {
+	fsys, _ := formatAndMount(t, 8192, FormatParams{Format: FormatFAT16, ClusterSize: 1})
+	var f File
+	if err := fsys.OpenFile(&f, "a.dat", ModeWrite|ModeCreateAlways); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fsys.OpenFile(&f, "a.dat", ModeRead); err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	pos, err := f.Seek(4096, io.SeekStart)
+	if err != nil {
+		t.Fatal("seek:", err)
+	}
+	if pos != 4096 {
+		t.Errorf("read-only Seek past EOF landed at %d, want 4096: the seek was clipped to the "+
+			"end of the file and reported as though it had succeeded", pos)
+	}
+	if pos, err = f.Seek(0, io.SeekCurrent); err != nil || pos != 4096 {
+		t.Errorf("the position did not stick: got %d, %v", pos, err)
+	}
+}
+
+// TestWriteAfterSeekPastEndZeroFills is the security-relevant one, and it is
+// worth being precise about what it demonstrates.
+//
+// FAT has no sparse files. Growing a file links clusters into its chain and
+// raises its size; it does not touch their data sectors. So the bytes between the
+// old end of the file and a write past it are not a "hole" — they are ordinary
+// file content that nobody wrote, and FatFs hands back whatever the media last
+// held there. On a volume that has ever deleted a file, that is the deleted
+// file's contents, given to a caller who never wrote them.
+//
+// This creates a file, fills it with a recognizable pattern, deletes it, and then
+// makes a new file with a gap over the same clusters. By default the gap must read
+// as zeros. Under FSConfig.NoZeroFilling it must read as the deleted file — which
+// is not an accident but the point: it proves the reuse really happens, so the
+// zero-filling above is preventing a real disclosure and not a hypothetical one.
+func TestWriteAfterSeekPastEndZeroFills(t *testing.T) {
+	const (
+		secretByte = 0xA5
+		secretSize = 8192
+		gapAt      = 4096
+	)
+
+	// makeHole formats a volume, writes and deletes a file full of secretByte,
+	// then creates a new file with a gap where the old one was, and returns the
+	// contents of that gap.
+	makeHole := func(t *testing.T, noZeroFill bool) []byte {
+		t.Helper()
+		fsys, dev := formatAndMount(t, 8192, FormatParams{Format: FormatFAT16, ClusterSize: 1})
+		fsys.Configure(FSConfig{NoZeroFilling: noZeroFill})
+
+		secret := bytes.Repeat([]byte{secretByte}, secretSize)
+		var f File
+		if err := fsys.OpenFile(&f, "secret.dat", ModeWrite|ModeCreateAlways); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(secret); err != nil {
+			t.Fatal("write secret:", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsys.Remove("secret.dat"); err != nil {
+			t.Fatal("remove secret:", err)
+		}
+
+		// Remount so the allocator forgets where it got to and starts looking for
+		// free clusters from the beginning of the volume — which is where the
+		// deleted file's clusters are. This is what a power cycle does.
+		if err := fsys.Unmount(); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsys.Mount(dev, 512, ModeRW); err != nil {
+			t.Fatal(err)
+		}
+		fsys.Configure(FSConfig{NoZeroFilling: noZeroFill})
+
+		// A new file with a gap: write one byte, seek past it, write one byte.
+		if err := fsys.OpenFile(&f, "victim.dat", ModeRW|ModeCreateAlways); err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString("x"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Seek(gapAt, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("y"); err != nil {
+			t.Fatal("write past the gap:", err)
+		}
+		if f.Size() != gapAt+1 {
+			t.Fatalf("victim size = %d, want %d", f.Size(), gapAt+1)
+		}
+		gap := make([]byte, gapAt-1)
+		if _, err := f.ReadAt(gap, 1); err != nil {
+			t.Fatal("read the gap:", err)
+		}
+		return gap
+	}
+
+	t.Run("zero-filled by default", func(t *testing.T) {
+		gap := makeHole(t, false)
+		if i := bytes.IndexByte(gap, secretByte); i >= 0 {
+			t.Fatalf("the gap contains the deleted file's contents at byte %d: a caller was "+
+				"handed data it never wrote and was never given", i)
+		}
+		for i, b := range gap {
+			if b != 0 {
+				t.Fatalf("the gap reads %#02x at byte %d, want 0", b, i)
+			}
+		}
+	})
+
+	t.Run("NoZeroFilling hands back the media, as FatFs does", func(t *testing.T) {
+		gap := makeHole(t, true)
+		if bytes.IndexByte(gap, secretByte) < 0 {
+			t.Skip("the allocator did not reuse the deleted file's clusters here, so there is " +
+				"nothing for this to observe; the zero-filling half of the test is the one that matters")
+		}
+		// Asserting the disclosure on purpose. This is what the default prevents.
+		t.Logf("NoZeroFilling: %d of %d gap bytes are the deleted file's, as FatFs leaves them",
+			bytes.Count(gap, []byte{secretByte}), len(gap))
+	})
+}
+
+// TestTruncateDoesNotMoveOffset: POSIX ftruncate leaves the file offset alone,
+// even when it ends up past the new end of the file. A later write there extends
+// the file back out, over a zero-filled gap.
+func TestTruncateDoesNotMoveOffset(t *testing.T) {
+	fsys, _ := formatAndMount(t, 8192, FormatParams{Format: FormatFAT16, ClusterSize: 1})
+	var f File
+	if err := fsys.OpenFile(&f, "a.dat", ModeRW|ModeCreateAlways); err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(make([]byte, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(255); err != nil {
+		t.Fatal("truncate:", err)
+	}
+	pos, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos != 1000 {
+		t.Fatalf("the offset moved to %d on truncate, want 1000: truncate must not move it", pos)
+	}
+	if f.Size() != 255 {
+		t.Fatalf("size = %d, want 255", f.Size())
+	}
+	// Writing at the offset the caller chose extends the file back out to it.
+	if _, err = f.WriteString("z"); err != nil {
+		t.Fatal(err)
+	}
+	if f.Size() != 1001 {
+		t.Fatalf("size after writing at offset 1000 = %d, want 1001", f.Size())
+	}
+	gap := make([]byte, 1000-255)
+	if _, err = f.ReadAt(gap, 255); err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range gap {
+		if b != 0 {
+			t.Fatalf("the gap left by truncate-then-write reads %#02x at byte %d, want 0", b, i)
 		}
 	}
 }

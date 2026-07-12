@@ -67,6 +67,77 @@ func (fsys *FS) BlockSize() int {
 	return int(fsys.ssize)
 }
 
+// FSConfig holds the behavioral choices an FS makes that the FAT format itself
+// does not decide. It may be set at any time; the zero value is the default.
+type FSConfig struct {
+	// NoZeroFilling leaves the gap created by growing a file past its end
+	// uninitialized, which is what FatFs does and what f_lseek documents ("the
+	// contents of the expanded area are undefined").
+	//
+	// Understand what the gap is before setting this. FAT has no sparse files: a
+	// file is a size plus a chain of clusters, and every byte inside the size is
+	// file content. Growing a file links clusters into the chain and raises the
+	// size — it does not touch their data sectors. So the "gap" is not a hole, it
+	// is ordinary file content that nobody wrote, and it reads back as whatever
+	// was last on the media. On a volume that has ever deleted a file, that is
+	// the deleted file's contents, handed to a caller who never wrote them and
+	// was never given them.
+	//
+	// By default this package zero-fills that gap, as POSIX and the Windows FAT
+	// driver do. The cost is real — the gap is written, so a Seek far past EOF
+	// followed by a Write now costs the bytes it skipped — and that cost is why
+	// FatFs declined to pay it on an 8-bit micro. Set this to get FatFs' bytes
+	// back, exactly: for byte-for-byte compatibility with a reference image, or
+	// when the write bandwidth matters more than what the gap discloses.
+	NoZeroFilling bool
+}
+
+// Configure applies cfg to the filesystem. It may be called before or after
+// Mount, and affects only subsequent operations.
+func (fsys *FS) Configure(cfg FSConfig) {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	fsys.noZeroFill = cfg.NoZeroFilling
+}
+
+// zeros is the source for zero-filling a gap. It is read-only and shared:
+// f_write never modifies the buffer it is given.
+var zeros [512]byte
+
+// growTo brings FatFs' file pointer to ofs, extending the file if ofs is past
+// the end of it. This is where a position that outran the file becomes real.
+//
+// The extension is zero-filled unless [FSConfig.NoZeroFilling] is set: FatFs grows
+// a file by linking clusters and never erasing them, so the bytes in between
+// would otherwise be whatever the media last held. Writing zeros through f_write
+// allocates exactly the same clusters FatFs' own stretch would, and initializes
+// them on the way past.
+func (fp *File) growTo(ofs int64) fileResult {
+	fsys := fp.obj.fs
+	if ofs <= fp.obj.objsize {
+		return fp.f_lseek(ofs) // Nothing to grow; the data is already there.
+	}
+	if fp.flag&faWrite == 0 {
+		return frDenied // Only a writable handle can extend a file.
+	}
+	if fsys.noZeroFill {
+		return fp.f_lseek(ofs) // FatFs: stretch the chain and leave the gap as it lies.
+	}
+	if fr := fp.f_lseek(fp.obj.objsize); fr != frOK {
+		return fr
+	}
+	for fp.fptr < ofs {
+		n := min(int64(len(zeros)), ofs-fp.fptr)
+		bw, fr := fp.f_write(zeros[:n])
+		if fr != frOK {
+			return fr
+		} else if int64(bw) < n {
+			return frDenied // The device filled up before the gap was covered.
+		}
+	}
+	return frOK
+}
+
 // AppendLabel appends the volume label of the mounted filesystem to dst and
 // returns the extended buffer. It appends nothing if the volume has no label
 // entry in its root directory.
@@ -162,23 +233,46 @@ func (fp *File) Read(buf []byte) (int, error) {
 		return 0, fr
 	}
 	defer fsys.mu.Unlock()
+	if fp.pos > fp.obj.objsize {
+		// The position was seeked past the end. There is nothing there to read, and
+		// it must not be reached by seeking FatFs' pointer to it: that would clip
+		// the pointer on a read-only handle and grow the file on a writable one.
+		if fp.flag&faRead == 0 {
+			return 0, frDenied
+		}
+		return 0, io.EOF
+	}
+	if fr = fp.f_lseek(fp.pos); fr != frOK {
+		return 0, fr
+	}
 	br, fr := fp.f_read(buf)
+	fp.pos = fp.fptr
 	if fr != frOK {
 		return br, fr
-	} else if br == 0 && fr == frOK {
+	} else if br == 0 {
 		return br, io.EOF
 	}
 	return br, nil
 }
 
 // Write writes len(buf) bytes to the File. It implements the [io.Writer] interface.
+//
+// Writing at a position past the end of the file extends it, and the bytes
+// skipped over are zero-filled — see [FSConfig.NoZeroFilling] for what that costs
+// and how to turn it off.
 func (fp *File) Write(buf []byte) (int, error) {
 	fsys, fr := fp.lock()
 	if fr != frOK {
 		return 0, fr
 	}
 	defer fsys.mu.Unlock()
+	// Make the position real before writing at it: it may be past the end of the
+	// file, in which case the gap in between has to be allocated and filled.
+	if fr = fp.growTo(fp.pos); fr != frOK {
+		return 0, fr
+	}
 	bw, fr := fp.f_write(buf)
+	fp.pos = fp.fptr
 	if fr != frOK {
 		return bw, fr
 	} else if bw < len(buf) {
@@ -208,19 +302,16 @@ func (fp *File) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, errNegativeOffset
 	} else if off >= fp.obj.objsize {
-		// Checked before seeking since f_lseek past EOF in write mode
-		// would grow the file.
 		return 0, io.EOF
 	}
-	cur := fp.fptr
-	fr = fp.f_lseek(off)
-	if fr != frOK {
+	cur := fp.pos
+	if fr = fp.f_lseek(off); fr != frOK {
 		return 0, fr
 	}
 	n, fr := fp.f_read(p)
-	if frs := fp.f_lseek(cur); fr == frOK {
-		fr = frs
-	}
+	// Restoring the position costs nothing: it is a number, and FatFs' pointer is
+	// brought back into line lazily by whatever runs next.
+	fp.pos = cur
 	if fr != frOK {
 		return n, fr
 	} else if n < len(p) {
@@ -232,7 +323,7 @@ func (fp *File) ReadAt(p []byte, off int64) (int, error) {
 // WriteAt writes len(p) bytes to the File starting at byte offset off. It
 // implements the [io.WriterAt] interface: the offset used by Read, Write and
 // Seek is saved and restored, so WriteAt does not affect it. Writing past the
-// end of the file extends it; the contents of any gap are undefined.
+// end of the file extends it, zero-filling the gap; see [FSConfig.NoZeroFilling].
 func (fp *File) WriteAt(p []byte, off int64) (int, error) {
 	fsys, fr := fp.lock()
 	if fr != frOK {
@@ -244,15 +335,12 @@ func (fp *File) WriteAt(p []byte, off int64) (int, error) {
 	} else if fp.flag&faWrite == 0 {
 		return 0, frWriteProtected
 	}
-	cur := fp.fptr
-	fr = fp.f_lseek(off)
-	if fr != frOK {
+	cur := fp.pos
+	if fr = fp.growTo(off); fr != frOK {
 		return 0, fr
 	}
 	n, fr := fp.f_write(p)
-	if frs := fp.f_lseek(cur); fr == frOK {
-		fr = frs
-	}
+	fp.pos = cur
 	if fr != frOK {
 		return n, fr
 	} else if n < len(p) {
@@ -274,10 +362,12 @@ func (fp *File) Size() int64 {
 }
 
 // Truncate changes the size of the file to size, discarding data past the new
-// end when shrinking and extending the file when growing (the contents of the
-// extension are undefined). The file must be open for writing. If the current
-// offset is beyond the new size it is moved to the new end of file; otherwise
-// Truncate does not affect it.
+// end when shrinking and extending it with zeros when growing (see
+// [FSConfig.NoZeroFilling]). The file must be open for writing.
+//
+// It does not move the file offset, as POSIX ftruncate does not. An offset left
+// beyond the new end of the file stays there, and a write at it will extend the
+// file back out.
 func (fp *File) Truncate(size int64) error {
 	fsys, fr := fp.lock()
 	if fr != frOK {
@@ -291,30 +381,40 @@ func (fp *File) Truncate(size int64) error {
 	} else if fp.flag&faWrite == 0 || fsys.perm&ModeWrite == 0 {
 		return frWriteProtected
 	}
-	cur := fp.fptr
-	// Seeking grows the cluster chain when size exceeds the file size,
-	// and positions fptr for f_truncate to shrink to when below it.
-	fr = fp.f_lseek(size)
+	cur := fp.pos
+	// f_truncate cuts the file at FatFs' pointer — it takes no size — so the
+	// pointer has to be put where the new end belongs. growTo does that, and
+	// allocates and fills the extension if the new end is past the old one.
+	fr = fp.growTo(size)
 	if fr == frOK {
 		fr = fp.f_truncate()
-	}
-	if cur > size {
-		cur = size
-	}
-	if frs := fp.f_lseek(cur); fr == frOK {
-		fr = frs
 	}
 	if fr != frOK {
 		return fr
 	}
+	// The offset is a number, not a cursor into the data, so it survives the file
+	// shrinking out from under it. This is the whole reason File carries pos: with
+	// only FatFs' pointer to work with, restoring an offset beyond the new size
+	// would mean seeking there, and seeking there on a writable handle would grow
+	// the file straight back and undo the truncate.
+	fp.pos = cur
 	return nil
 }
 
 // Seek sets the offset for the next Read or Write on the file to offset,
 // interpreted according to whence: [io.SeekStart], [io.SeekCurrent] or
 // [io.SeekEnd]. It returns the new offset and implements the [io.Seeker]
-// interface. Seeking past the end of a file open for writing extends the
-// file; the contents of the gap are undefined.
+// interface.
+//
+// Seeking past the end of the file is legal and changes nothing on the device:
+// the file does not grow, no clusters are allocated, and the seek cannot fail
+// for want of space. The gap appears only when something writes into it, and a
+// Read before then returns io.EOF. This is what os.File does.
+//
+// It is not what FatFs does. f_lseek will not let its pointer exceed the file
+// size, so it extends the file on a writable handle and silently clips the seek
+// back to the end on a read-only one — a caller who seeks to 48 in an empty file
+// is told it is at 0. Neither happens here; see File.pos.
 func (fp *File) Seek(offset int64, whence int) (int64, error) {
 	fsys, fr := fp.lock()
 	if fr != frOK {
@@ -326,7 +426,7 @@ func (fp *File) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekStart:
 		abs = offset
 	case io.SeekCurrent:
-		abs = fp.fptr + offset
+		abs = fp.pos + offset
 	case io.SeekEnd:
 		abs = fp.obj.objsize + offset
 	default:
@@ -335,11 +435,15 @@ func (fp *File) Seek(offset int64, whence int) (int64, error) {
 	if abs < 0 {
 		return 0, errNegativeSeek
 	}
-	fr = fp.f_lseek(abs)
-	if fr != frOK {
-		return 0, fr
+	if abs <= fp.obj.objsize {
+		// Within the file: move FatFs' pointer now, so a seek to an unreachable
+		// offset still reports the disk error that finding it produced.
+		if fr = fp.f_lseek(abs); fr != frOK {
+			return 0, fr
+		}
 	}
-	return fp.fptr, nil
+	fp.pos = abs
+	return abs, nil
 }
 
 // Close closes the file and syncs any unwritten data to the underlying device.

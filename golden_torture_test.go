@@ -470,6 +470,12 @@ func TestGoldenTortureFAT12(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
+	// The C reference leaves the gap made by growing a file past its end
+	// uninitialized, and the script below makes one (seek past EOF, then write).
+	// This package zero-fills that gap by default, which is a better filesystem
+	// and a different image — so to compare against FatFs byte for byte we have to
+	// ask for FatFs' bytes. See FSConfig.NoZeroFilling.
+	fsys.Configure(FSConfig{NoZeroFilling: true})
 	if fsys.fstype != FormatFAT12 {
 		t.Fatalf("fstype = %d, want FAT12", fsys.fstype)
 	}
@@ -488,6 +494,12 @@ func TestGoldenTortureFAT16(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
+	// The C reference leaves the gap made by growing a file past its end
+	// uninitialized, and the script below makes one (seek past EOF, then write).
+	// This package zero-fills that gap by default, which is a better filesystem
+	// and a different image — so to compare against FatFs byte for byte we have to
+	// ask for FatFs' bytes. See FSConfig.NoZeroFilling.
+	fsys.Configure(FSConfig{NoZeroFilling: true})
 	if fsys.fstype != FormatFAT16 {
 		t.Fatalf("fstype = %d, want FAT16", fsys.fstype)
 	}
@@ -510,6 +522,12 @@ func TestGoldenTortureFAT32(t *testing.T) {
 	if err := fsys.Mount(dev, 512, ModeRW); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
+	// The C reference leaves the gap made by growing a file past its end
+	// uninitialized, and the script below makes one (seek past EOF, then write).
+	// This package zero-fills that gap by default, which is a better filesystem
+	// and a different image — so to compare against FatFs byte for byte we have to
+	// ask for FatFs' bytes. See FSConfig.NoZeroFilling.
+	fsys.Configure(FSConfig{NoZeroFilling: true})
 	if fsys.fstype != FormatFAT32 {
 		t.Fatalf("fstype = %d, want FAT32", fsys.fstype)
 	}

@@ -42,6 +42,9 @@ type FS struct {
 	fsi_flag uint8  // FSInfo dirty flag. b7:disabled, b0:dirty.
 	nrootdir uint16 // Number of root directory entries.
 
+	// noZeroFill is [Config.NoZeroFilling]. See [FS.Configure].
+	noZeroFill bool
+
 	blk    blkIdxer
 	csize  uint16    // Cluster size in sectors.
 	ssize  uint16    // Sector size in bytes.
@@ -88,10 +91,22 @@ type objid struct {
 }
 
 type File struct {
-	obj      objid
-	flag     uint8
-	err      fileResult // abort flag (error code)
+	obj  objid
+	flag uint8
+	err  fileResult // abort flag (error code)
+
+	// fptr is FatFs' file pointer, and it cannot exceed the file size: f_lseek
+	// clips it on a read-only handle and GROWS THE FILE on a writable one, so it
+	// is not a position so much as a cursor into data that exists.
+	//
+	// pos is the position the exported API promises, and it may sit past the end
+	// of the file, where POSIX puts it after a seek past EOF. It is authoritative;
+	// fptr trails it and is brought into line by File.seekTo before anything
+	// touches the disk, or by File.growTo when a write has to make the gap real.
+	// Nothing below this line in the file — none of the ported FatFs — knows pos
+	// exists.
 	fptr     int64
+	pos      int64
 	clust    uint32
 	sect     lba
 	dir_sect lba
@@ -617,6 +632,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fp.err = 0
 	fp.sect = 0
 	fp.fptr = 0
+	fp.pos = 0
 	fp.buf = [512]byte{} // Clear sector buffer.
 
 	if mode&faSEEKEND != 0 && fp.obj.objsize > 0 {
@@ -651,6 +667,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 			}
 		}
 	}
+	fp.pos = fp.fptr // Zero, or the end of the file when opened in append mode.
 	if res != frOK {
 		fp.obj.fs = nil
 	}
@@ -676,6 +693,8 @@ func (fp *File) f_lseek(ofs int64) (res fileResult) {
 		return res
 	} else if fp.err != frOK {
 		return fp.err
+	} else if ofs == fp.fptr {
+		return frOK
 	}
 	if fsys.isExfat() {
 		// Fill last fragment on the FAT if needed.

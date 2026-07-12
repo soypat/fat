@@ -25,6 +25,50 @@ func formatAndMount(t *testing.T, numBlocks int, cfg FormatParams) (*FS, *BlockB
 	return &fsys, dev
 }
 
+// TestFormatFATGolden requires the FAT12, FAT16 and FAT32 formatter to produce
+// byte-for-byte what C FatFs f_mkfs produces, which is the strongest statement
+// available about a port: not "it mounts" or "it round-trips", but "it is the
+// reference implementation".
+//
+// The images come from testdata/mkgolden.c, which calls f_mkfs with FM_SFD,
+// n_fat 2 and a zero get_fattime(). MKFS_PARM.au_size is in BYTES where our
+// FormatParams.ClusterSize is in sectors, hence the conversion below.
+func TestFormatFATGolden(t *testing.T) {
+	for _, test := range []struct {
+		golden  string
+		format  Format
+		cluster int // Sectors. mkgolden.c's au_size / 512.
+	}{
+		{"golden-fmt12.img", FormatFAT12, 8}, // au 4096.
+		{"golden-fmt16.img", FormatFAT16, 1}, // au 512.
+		{"golden-fmt32.img", FormatFAT32, 1}, // au 512.
+	} {
+		t.Run(test.golden, func(t *testing.T) {
+			want := goldenImage(t, test.golden)
+			blk, err := makeBlockIndexer(512)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dev := &BlockByteSlice{blk: blk, buf: make([]byte, len(want))}
+			var fmtr Formatter
+			err = fmtr.Format(dev, 512, len(want)/512, FormatParams{
+				Format:      test.format,
+				ClusterSize: test.cluster,
+			})
+			if err != nil {
+				t.Fatal("format:", err)
+			}
+			for i := range want {
+				if dev.buf[i] != want[i] {
+					t.Fatalf("first mismatch at offset %#x (sector %d, byte %d): got %#02x, want %#02x. "+
+						"The formatter is not byte-identical to C f_mkfs.",
+						i, i/512, i%512, dev.buf[i], want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestFormatFATSubtype is the test that makes the FAT12/16/32 formatter worth
 // having, and the one that a formatter is most likely to fail silently.
 //
