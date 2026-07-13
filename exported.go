@@ -22,6 +22,10 @@ const (
 	ModeCreateAlways Mode = Mode(faCreateAlways)
 	ModeOpenExisting Mode = Mode(faOpenExisting)
 	ModeOpenAppend   Mode = Mode(faOpenAppend)
+	// ModeAppend is POSIX O_APPEND: every write goes to the end of the file,
+	// and nothing else moves the file position — reads start at the beginning.
+	// Unlike ModeOpenAppend it does not create a missing file.
+	ModeAppend Mode = Mode(faAppend)
 	// ModeOpenAlways opens the file, creating it if it does not exist. Unlike
 	// ModeCreateAlways the contents of an existing file are preserved and the
 	// read/write pointer starts at the beginning of the file.
@@ -266,16 +270,21 @@ func (fp *File) Write(buf []byte) (int, error) {
 		return 0, fr
 	}
 	defer fsys.mu.Unlock()
+	pos := fp.pos
 	if fp.flag&faAppend != 0 {
-		fp.pos = fp.obj.objsize
+		// POSIX append: to the end of the file before each write. Not committed
+		// to fp.pos yet — a write that fails must leave the offset where it was.
+		pos = fp.obj.objsize
 	}
 	// Make the position real before writing at it: it may be past the end of the
 	// file, in which case the gap in between has to be allocated and filled.
-	if fr = fp.growTo(fp.pos); fr != frOK {
+	if fr = fp.growTo(pos); fr != frOK {
 		return 0, fr
 	}
 	bw, fr := fp.f_write(buf)
-	fp.pos = fp.fptr
+	if bw > 0 || fr == frOK {
+		fp.pos = fp.fptr
+	}
 	if fr != frOK {
 		return bw, fr
 	} else if bw < len(buf) {

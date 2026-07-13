@@ -938,3 +938,40 @@ func TestTruncateDoesNotMoveOffset(t *testing.T) {
 		}
 	}
 }
+
+// TestFailedWriteDoesNotMoveOffset: a write that is denied must leave the file
+// offset where it was — including on an append handle, where the offset would
+// have moved to the end of the file had the write been allowed. The fuzzer
+// found the append variant within seconds of ModeAppend landing: the move to
+// EOF ran before the access check did.
+func TestFailedWriteDoesNotMoveOffset(t *testing.T) {
+	fsys, _ := formatAndMount(t, 8192, FormatParams{Format: FormatFAT16, ClusterSize: 1})
+	var f File
+	if err := fsys.OpenFile(&f, "a.dat", ModeWrite|ModeCreateAlways); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fsys.OpenFile(&f, "a.dat", ModeRead|ModeAppend); err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(3, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("nope")); err == nil {
+		t.Fatal("write on a read-only handle succeeded")
+	}
+	pos, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos != 3 {
+		t.Fatalf("offset = %d after a denied write, want 3: a failed write must not move it", pos)
+	}
+}
