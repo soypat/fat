@@ -635,11 +635,11 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 	fp.pos = 0
 	fp.buf = [512]byte{} // Clear sector buffer.
 
-	if mode&faSEEKEND != 0 && fp.obj.objsize > 0 {
+	if mode&faAppend != 0 && fp.obj.objsize > 0 {
 		fp.fptr = fp.obj.objsize
 	}
 
-	if mode&faSEEKEND != 0 && fp.obj.objsize > 0 {
+	if mode&faAppend != 0 && fp.obj.objsize > 0 {
 		// Seek to end of file. i.e: if Append mode is passed.
 		fp.fptr = fp.obj.objsize
 		bcs := fsys.csize * fsys.ssize
@@ -667,7 +667,7 @@ func (fsys *FS) f_open(fp *File, name string, mode accessmode) fileResult {
 			}
 		}
 	}
-	fp.pos = fp.fptr // Zero, or the end of the file when opened in append mode.
+	fp.pos = 0
 	if res != frOK {
 		fp.obj.fs = nil
 	}

@@ -266,6 +266,9 @@ func (fp *File) Write(buf []byte) (int, error) {
 		return 0, fr
 	}
 	defer fsys.mu.Unlock()
+	if fp.flag&faAppend != 0 {
+		fp.pos = fp.obj.objsize
+	}
 	// Make the position real before writing at it: it may be past the end of the
 	// file, in which case the gap in between has to be allocated and filled.
 	if fr = fp.growTo(fp.pos); fr != frOK {

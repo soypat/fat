@@ -221,7 +221,7 @@ func fatInitDiff(data []byte) (s string) {
 
 func initTestFAT() (*FS, BlockDeviceExtended) {
 	return initTestFATWithLogger(32000, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slogLevelTrace,
+		Level: slog.LevelError,
 	})))
 
 }

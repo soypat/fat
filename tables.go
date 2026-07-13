@@ -28,10 +28,23 @@ const (
 	faCreateNew accessmode = 1 << (iota + 2)
 	faCreateAlways
 	faOpenAlways
-	faOpenAppend accessmode = 0x30
+	faOpenAppend accessmode = 0x30 // faOpenAlways|faAppend: create if missing, and append.
+
+	// faAppend is POSIX append: every write goes to the end of the file, and
+	// nothing else moves the file position.
+	//
+	// FatFs calls this bit FA_SEEKEND and means something weaker by it — seek to
+	// the end ONCE, when the file is opened. That is not the same thing and it is
+	// not what a caller asking for append wants: the open-time seek also moves the
+	// position a READ starts from, so a file opened for reading with append set
+	// sits at its own end and reads EOF forever, and the seek does not survive the
+	// caller seeking somewhere else, so a Seek followed by a Write overwrites
+	// where it should have appended. POSIX is explicit that O_APPEND governs
+	// writes only.
+	faAppend = 0x20
+
 	// Internal use file access:
 
-	faSEEKEND  = 0x20 // Seek to end of the file on file open
 	faMODIFIED = 0x40 // File has been modified
 	faDIRTY    = 0x80 // FIL.buf[] needs to be written-back
 )
