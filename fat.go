@@ -21,6 +21,8 @@ type BlockDevice interface {
 	// Mode() accessmode
 }
 
+type logger func(ctx context.Context, lvl slog.Level, msg string, attrs ...slog.Attr)
+
 // sector index type.
 type lba uint32
 
@@ -75,7 +77,7 @@ type FS struct {
 	perm       Mode
 	codepage   []byte // unicode conversion table.
 	exCvt      []byte //  points to _tblCT* corresponding to codepage table.
-	log        *slog.Logger
+	log        logger
 }
 
 type objid struct {
@@ -1886,7 +1888,7 @@ const slogLevelTrace = slog.LevelDebug - 2
 
 func (fsys *FS) logattrs(level slog.Level, msg string, attrs ...slog.Attr) {
 	if fsys.log != nil {
-		fsys.log.LogAttrs(context.Background(), level, msg, attrs...)
+		fsys.log(context.Background(), level, msg, attrs...)
 	}
 }
 

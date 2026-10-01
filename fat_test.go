@@ -228,7 +228,9 @@ func initTestFAT() (*FS, BlockDeviceExtended) {
 func initTestFATWithLogger(size int64, log *slog.Logger) (*FS, BlockDeviceExtended) {
 	dev := DefaultFATByteBlocks(int(size))
 	var fs FS
-	fs.log = log
+	if log != nil {
+		fs.log = log.LogAttrs
+	}
 	ss := uint16(dev.BlockSize())
 	err := fs.Mount(dev, int(ss), ModeRW)
 	if err != nil {

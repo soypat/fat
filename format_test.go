@@ -25,10 +25,10 @@ func formatAndMount(t *testing.T, numBlocks int, cfg FormatParams) (*FS, *BlockB
 	return &fsys, dev
 }
 
-// TestFormatFATGolden requires the FAT12, FAT16 and FAT32 formatter to produce
-// byte-for-byte what C FatFs f_mkfs produces, which is the strongest statement
-// available about a port: not "it mounts" or "it round-trips", but "it is the
-// reference implementation".
+// TestFormatFATGolden requires the FAT12, FAT16, FAT32 and exFAT formatter to
+// produce byte-for-byte what C FatFs f_mkfs produces on a pristine volume,
+// which is the strongest statement available about a port: not "it mounts" or
+// "it round-trips", but "it is the reference implementation".
 //
 // The images come from testdata/mkgolden.c, which calls f_mkfs with FM_SFD,
 // n_fat 2 and a zero get_fattime(). MKFS_PARM.au_size is in BYTES where our
@@ -42,8 +42,12 @@ func TestFormatFATGolden(t *testing.T) {
 		{"golden-fmt12.img", FormatFAT12, 8}, // au 4096.
 		{"golden-fmt16.img", FormatFAT16, 1}, // au 512.
 		{"golden-fmt32.img", FormatFAT32, 1}, // au 512.
+		{"golden-fmtex.img", FormatExFAT, 1}, // au 512.
 	} {
 		t.Run(test.golden, func(t *testing.T) {
+			if test.format == FormatExFAT {
+				skipIfNoExFAT(t)
+			}
 			want := goldenImage(t, test.golden)
 			blk, err := makeBlockIndexer(512)
 			if err != nil {
