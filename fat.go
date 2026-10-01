@@ -78,6 +78,7 @@ type FS struct {
 	codepage   []byte // unicode conversion table.
 	exCvt      []byte //  points to _tblCT* corresponding to codepage table.
 	log        logger
+	logbuf     [4]slog.Attr
 }
 
 type objid struct {
@@ -1888,7 +1889,8 @@ const slogLevelTrace = slog.LevelDebug - 2
 
 func (fsys *FS) logattrs(level slog.Level, msg string, attrs ...slog.Attr) {
 	if fsys.log != nil {
-		fsys.log(context.Background(), level, msg, attrs...)
+		n := copy(fsys.logbuf[:], attrs)
+		fsys.log(context.Background(), level, msg, fsys.logbuf[:n]...)
 	}
 }
 
